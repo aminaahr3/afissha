@@ -112,15 +112,16 @@ function getAdminAuth(req: Request): string {
 }
 
 function checkAdmin(req: Request, res: Response): boolean {
-  const adminPassword = process.env.ADMIN_PASSWORD;
-  if (!adminPassword) { res.status(500).json({ error: "Admin password not configured. Set ADMIN_PASSWORD env variable." }); return false; }
-  const authResult = getAdminAuth(req);
-  if (authResult === adminPassword) return true;
   const authHeader = req.headers["authorization"] as string;
   const xAdminToken = req.headers["x-admin-token"] as string;
   let token = xAdminToken;
   if (authHeader && authHeader.startsWith("Bearer ")) token = authHeader.substring(7);
   if (token && isValidAdminToken(token)) return true;
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  if (adminPassword) {
+    const authResult = getAdminAuth(req);
+    if (authResult === adminPassword) return true;
+  }
   res.status(401).json({ success: false, message: "Unauthorized" });
   return false;
 }
@@ -1256,14 +1257,14 @@ app.get("/api/event-by-city/:citySlug/:templateId", async (req, res) => {
       const linkResult = await pool.query(`
         SELECT gl.*, et.name as event_name, et.description, et.is_active as template_active,
                cat.name_ru as category_name, cities.name as city_name
-        FROM generated_links gl JOIN event_templates et ON gl.event_template_id = et.id
-        JOIN categories cat ON et.category_id = cat.id JOIN cities ON gl.city_id = cities.id
+        FROM generated_links gl LEFT JOIN event_templates et ON gl.event_template_id = et.id
+        LEFT JOIN categories cat ON et.category_id = cat.id LEFT JOIN cities ON gl.city_id = cities.id
         WHERE gl.id = $1`, [linkIdParam]);
 
       if (linkResult.rows.length > 0) {
         const link = linkResult.rows[0];
-        const expectedCitySlug = transliterateCityName(link.city_name);
-        if (citySlug !== expectedCitySlug || parseInt(templateId) !== link.event_template_id) return res.status(404).json({ error: "Link not found" });
+        const expectedCitySlug = transliterateCityName(link.city_name || '');
+        if (link.city_name && (citySlug !== expectedCitySlug || parseInt(templateId) !== link.event_template_id)) return res.status(404).json({ error: "Link not found" });
         if (!link.is_active) return res.status(404).json({ error: "Link is disabled" });
         if (!link.template_active) return res.status(404).json({ error: "Event not found" });
 
@@ -1272,10 +1273,10 @@ app.get("/api/event-by-city/:citySlug/:templateId", async (req, res) => {
         const eventDate = link.event_date ? new Date(link.event_date) : new Date();
 
         return res.json({
-          id: link.event_template_id, linkId: link.id, linkCode: link.link_code, name: link.event_name,
-          description: link.description, images, imageUrl: images[0] || null, categoryId: link.category_id,
-          categoryName: link.category_name, cityId: link.city_id, cityName: link.city_name,
-          citySlug: transliterateCityName(link.city_name),
+          id: link.event_template_id, linkId: link.id, linkCode: link.link_code, name: link.event_name || 'Мероприятие',
+          description: link.description || '', images, imageUrl: images[0] || null, categoryId: link.category_id || 0,
+          categoryName: link.category_name || '', cityId: link.city_id, cityName: link.city_name || '',
+          citySlug: transliterateCityName(link.city_name || ''),
           eventDate: eventDate.toISOString().split('T')[0], eventTime: link.event_time || "12:00",
           venueAddress: link.venue_address || '', availableSeats: link.available_seats || 2, price: 2490,
         });
@@ -1293,7 +1294,7 @@ app.get("/api/event-by-city/:citySlug/:templateId", async (req, res) => {
       name: tmpl?.name || memLink.event_name, description: tmpl?.description || '',
       images: img ? [img] : [], imageUrl: img, categoryId: tmpl?.category_id || 0,
       categoryName: cat?.name_ru || '', cityId: memLink.city_id, cityName: memLink.city_name,
-      citySlug: transliterateCityName(memLink.city_name),
+      citySlug: transliterateCityName(memLink.city_name || ''),
       eventDate: eventDate.toISOString().split('T')[0], eventTime: memLink.event_time || "12:00",
       venueAddress: memLink.venue_address || '', availableSeats: memLink.available_seats || 2, price: 2490,
     });
@@ -1311,8 +1312,8 @@ app.get("/api/event-by-link/:linkId", async (req, res) => {
           SELECT gl.*, et.name as event_name, et.description, et.category_id,
                  cat.name_ru as category_name, cities.name as city_name,
                  COALESCE(gl.venue_address, eta.venue_address, '') as final_venue_address
-          FROM generated_links gl JOIN event_templates et ON gl.event_template_id = et.id
-          JOIN categories cat ON et.category_id = cat.id JOIN cities ON gl.city_id = cities.id
+          FROM generated_links gl LEFT JOIN event_templates et ON gl.event_template_id = et.id
+          LEFT JOIN categories cat ON et.category_id = cat.id LEFT JOIN cities ON gl.city_id = cities.id
           LEFT JOIN event_template_addresses eta ON eta.event_template_id = et.id AND eta.city_id = gl.city_id
           WHERE gl.id = $1`, [req.params.linkId]);
         if (result.rows.length > 0) {
@@ -1325,9 +1326,9 @@ app.get("/api/event-by-link/:linkId", async (req, res) => {
 
           return res.json({
             id: link.event_template_id, templateId: link.event_template_id, linkId: link.id,
-            linkCode: link.link_code, name: link.event_name, description: link.description,
-            images, imageUrl: images[0] || null, categoryName: link.category_name,
-            cityId: link.city_id, cityName: link.city_name, citySlug: transliterateCityName(link.city_name),
+            linkCode: link.link_code, name: link.event_name || 'Мероприятие', description: link.description || '',
+            images, imageUrl: images[0] || null, categoryName: link.category_name || '',
+            cityId: link.city_id, cityName: link.city_name || '', citySlug: transliterateCityName(link.city_name || ''),
             eventDate: eventDate.toISOString().split('T')[0], eventTime: link.event_time || "12:00",
             venueAddress: link.final_venue_address || '', availableSeats: link.available_seats || 2, price: 2490,
           });
