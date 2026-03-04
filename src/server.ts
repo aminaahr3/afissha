@@ -58,6 +58,23 @@ function generateOrderCode(): string {
 
 const adminSessionTokens = new Map<string, number>();
 
+interface InMemoryLink {
+  id: number;
+  link_code: string;
+  event_template_id: number;
+  city_id: number;
+  event_date: string;
+  event_time: string;
+  venue_address: string | null;
+  available_seats: number;
+  is_active: boolean;
+  created_at: string;
+  event_name: string;
+  city_name: string;
+}
+const inMemoryLinks: InMemoryLink[] = [];
+let inMemoryLinkIdCounter = 1;
+
 function generateAdminToken(): string {
   const token = crypto.randomBytes(48).toString('base64url');
   adminSessionTokens.set(token, Date.now() + 24 * 60 * 60 * 1000);
@@ -1037,43 +1054,77 @@ app.get("/api/generator/links", async (_req, res) => {
       const result = await pool.query(`SELECT gl.*, et.name as event_name, c.name as city_name FROM generated_links gl JOIN event_templates et ON gl.event_template_id = et.id JOIN cities c ON gl.city_id = c.id ORDER BY gl.created_at DESC LIMIT 50`);
       return res.json({ links: result.rows });
     }
-    res.json({ links: [] });
-  } catch { res.json({ links: [] }); }
+    res.json({ links: inMemoryLinks.slice().reverse().slice(0, 50) });
+  } catch { res.json({ links: inMemoryLinks.slice().reverse().slice(0, 50) }); }
 });
 
 app.post("/api/generator/create-link", async (req, res) => {
   try {
     const { event_template_id, city_id, event_date, event_time, available_seats } = req.body;
     const linkCode = generateLinkCode();
-    const pool = getPool();
-    const addrResult = await pool.query("SELECT venue_address FROM event_template_addresses WHERE event_template_id = $1 AND city_id = $2", [event_template_id, city_id]);
-    const venueAddress = addrResult.rows[0]?.venue_address || null;
-    const insertResult = await pool.query(`INSERT INTO generated_links (link_code, event_template_id, city_id, event_date, event_time, available_seats, venue_address, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7, true) RETURNING id`, [linkCode, event_template_id, city_id, event_date, event_time, available_seats || 100, venueAddress]);
-    res.json({ success: true, link_code: linkCode, link_id: insertResult.rows[0].id });
+    const pool = tryGetPool();
+    if (pool) {
+      const addrResult = await pool.query("SELECT venue_address FROM event_template_addresses WHERE event_template_id = $1 AND city_id = $2", [event_template_id, city_id]);
+      const venueAddress = addrResult.rows[0]?.venue_address || null;
+      const insertResult = await pool.query(`INSERT INTO generated_links (link_code, event_template_id, city_id, event_date, event_time, available_seats, venue_address, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7, true) RETURNING id`, [linkCode, event_template_id, city_id, event_date, event_time, available_seats || 100, venueAddress]);
+      return res.json({ success: true, link_code: linkCode, link_id: insertResult.rows[0].id });
+    }
+    const tmpl = EVENT_TEMPLATES.find(t => t.id === parseInt(event_template_id));
+    const city = CITIES.find(c => c.id === parseInt(city_id));
+    const newLink: InMemoryLink = {
+      id: inMemoryLinkIdCounter++,
+      link_code: linkCode,
+      event_template_id: parseInt(event_template_id),
+      city_id: parseInt(city_id),
+      event_date: event_date || new Date().toISOString().split('T')[0],
+      event_time: event_time || '12:00',
+      venue_address: null,
+      available_seats: available_seats || 100,
+      is_active: true,
+      created_at: new Date().toISOString(),
+      event_name: tmpl?.name || 'Мероприятие',
+      city_name: city?.name || 'Город',
+    };
+    inMemoryLinks.push(newLink);
+    res.json({ success: true, link_code: linkCode, link_id: newLink.id });
   } catch { res.status(500).json({ success: false, message: "Ошибка создания ссылки" }); }
 });
 
 app.get("/api/generator/link-info/:id", async (req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.query(`SELECT gl.*, et.name as event_name, c.name as city_name FROM generated_links gl LEFT JOIN event_templates et ON gl.event_template_id = et.id LEFT JOIN cities c ON gl.city_id = c.id WHERE gl.id = $1`, [req.params.id]);
-    if (result.rows.length === 0) return res.status(404).json({ error: "Link not found" });
-    res.json(result.rows[0]);
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query(`SELECT gl.*, et.name as event_name, c.name as city_name FROM generated_links gl LEFT JOIN event_templates et ON gl.event_template_id = et.id LEFT JOIN cities c ON gl.city_id = c.id WHERE gl.id = $1`, [req.params.id]);
+      if (result.rows.length > 0) return res.json(result.rows[0]);
+    }
+    const link = inMemoryLinks.find(l => l.id === parseInt(req.params.id));
+    if (!link) return res.status(404).json({ error: "Link not found" });
+    res.json(link);
   } catch { res.status(500).json({ error: "Server error" }); }
 });
 
 app.post("/api/generator/links/:id/toggle", async (req, res) => {
   try {
-    const pool = getPool();
-    await pool.query("UPDATE generated_links SET is_active = $1 WHERE id = $2", [req.body.is_active, req.params.id]);
+    const pool = tryGetPool();
+    if (pool) {
+      await pool.query("UPDATE generated_links SET is_active = $1 WHERE id = $2", [req.body.is_active, req.params.id]);
+      return res.json({ success: true });
+    }
+    const link = inMemoryLinks.find(l => l.id === parseInt(req.params.id));
+    if (link) link.is_active = req.body.is_active;
     res.json({ success: true });
   } catch { res.status(500).json({ success: false }); }
 });
 
 app.put("/api/generator/links/:id", async (req, res) => {
   try {
-    const pool = getPool();
-    await pool.query("UPDATE generated_links SET venue_address = $1, available_seats = $2 WHERE id = $3", [req.body.venue_address, req.body.available_seats, req.params.id]);
+    const pool = tryGetPool();
+    if (pool) {
+      await pool.query("UPDATE generated_links SET venue_address = $1, available_seats = $2 WHERE id = $3", [req.body.venue_address, req.body.available_seats, req.params.id]);
+      return res.json({ success: true });
+    }
+    const link = inMemoryLinks.find(l => l.id === parseInt(req.params.id));
+    if (link) { link.venue_address = req.body.venue_address; link.available_seats = req.body.available_seats; }
     res.json({ success: true });
   } catch { res.status(500).json({ success: false }); }
 });
@@ -1081,8 +1132,13 @@ app.put("/api/generator/links/:id", async (req, res) => {
 app.delete("/api/generator/links/:id", async (req, res) => {
   if (!checkAdmin(req, res)) return;
   try {
-    const pool = getPool();
-    await pool.query("DELETE FROM generated_links WHERE id = $1", [req.params.id]);
+    const pool = tryGetPool();
+    if (pool) {
+      await pool.query("DELETE FROM generated_links WHERE id = $1", [req.params.id]);
+      return res.json({ success: true });
+    }
+    const idx = inMemoryLinks.findIndex(l => l.id === parseInt(req.params.id));
+    if (idx >= 0) inMemoryLinks.splice(idx, 1);
     res.json({ success: true });
   } catch { res.status(500).json({ success: false }); }
 });
@@ -1093,12 +1149,19 @@ app.get("/api/links/validate", async (req, res) => {
   try {
     const linkCode = req.query.code as string;
     if (!linkCode) return res.status(400).json({ active: false, error: "No link code provided" });
-    const pool = getPool();
-    const result = await pool.query(`SELECT gl.id, gl.is_active, gl.city_id, c.name as city_name FROM generated_links gl JOIN cities c ON gl.city_id = c.id WHERE gl.link_code = $1`, [linkCode]);
-    if (result.rows.length === 0) return res.status(404).json({ active: false, error: "Link not found" });
-    const link = result.rows[0];
-    if (!link.is_active) return res.status(404).json({ active: false, error: "Link is disabled" });
-    res.json({ active: true, cityId: link.city_id, cityName: link.city_name });
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query(`SELECT gl.id, gl.is_active, gl.city_id, c.name as city_name FROM generated_links gl JOIN cities c ON gl.city_id = c.id WHERE gl.link_code = $1`, [linkCode]);
+      if (result.rows.length > 0) {
+        const link = result.rows[0];
+        if (!link.is_active) return res.status(404).json({ active: false, error: "Link is disabled" });
+        return res.json({ active: true, cityId: link.city_id, cityName: link.city_name });
+      }
+    }
+    const memLink = inMemoryLinks.find(l => l.link_code === linkCode);
+    if (!memLink) return res.status(404).json({ active: false, error: "Link not found" });
+    if (!memLink.is_active) return res.status(404).json({ active: false, error: "Link is disabled" });
+    res.json({ active: true, cityId: memLink.city_id, cityName: memLink.city_name });
   } catch { res.status(500).json({ active: false, error: "Server error" }); }
 });
 
@@ -1106,21 +1169,37 @@ app.get("/api/links/validate", async (req, res) => {
 app.get("/api/event-link/:code", async (req, res) => {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   try {
-    const pool = getPool();
-    const result = await pool.query(`
-      SELECT gl.*, et.name, et.description, et.category_id, et.id as template_id, c.name as city_name, cat.name_ru as category_name
-      FROM generated_links gl JOIN event_templates et ON gl.event_template_id = et.id
-      JOIN cities c ON gl.city_id = c.id JOIN categories cat ON et.category_id = cat.id
-      WHERE gl.link_code = $1 AND gl.is_active = true`, [req.params.code]);
-    if (result.rows.length === 0) return res.status(404).json({ error: "Link not found or inactive" });
-    const row = result.rows[0];
-    const imagesResult = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 5", [row.template_id]);
-    const images = imagesResult.rows.map(r => r.image_url);
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query(`
+        SELECT gl.*, et.name, et.description, et.category_id, et.id as template_id, c.name as city_name, cat.name_ru as category_name
+        FROM generated_links gl JOIN event_templates et ON gl.event_template_id = et.id
+        JOIN cities c ON gl.city_id = c.id JOIN categories cat ON et.category_id = cat.id
+        WHERE gl.link_code = $1 AND gl.is_active = true`, [req.params.code]);
+      if (result.rows.length > 0) {
+        const row = result.rows[0];
+        const imagesResult = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 5", [row.template_id]);
+        const images = imagesResult.rows.map(r => r.image_url);
+        return res.json({
+          id: row.id, templateId: row.template_id, linkCode: row.link_code, name: row.name, description: row.description,
+          images, imageUrl: images[0] || null, categoryId: row.category_id, categoryName: row.category_name,
+          cityId: row.city_id, cityName: row.city_name, eventDate: row.event_date, eventTime: row.event_time,
+          venueAddress: row.venue_address, availableSeats: row.available_seats, price: 2490
+        });
+      }
+    }
+    const memLink = inMemoryLinks.find(l => l.link_code === req.params.code && l.is_active);
+    if (!memLink) return res.status(404).json({ error: "Link not found or inactive" });
+    const tmpl = EVENT_TEMPLATES.find(t => t.id === memLink.event_template_id);
+    const cat = CATEGORIES.find(c => c.id === tmpl?.category_id);
+    const img = EVENT_TEMPLATE_IMAGES[memLink.event_template_id] || null;
     res.json({
-      id: row.id, templateId: row.template_id, linkCode: row.link_code, name: row.name, description: row.description,
-      images, imageUrl: images[0] || null, categoryId: row.category_id, categoryName: row.category_name,
-      cityId: row.city_id, cityName: row.city_name, eventDate: row.event_date, eventTime: row.event_time,
-      venueAddress: row.venue_address, availableSeats: row.available_seats, price: 2490
+      id: memLink.id, templateId: memLink.event_template_id, linkCode: memLink.link_code,
+      name: tmpl?.name || memLink.event_name, description: tmpl?.description || '',
+      images: img ? [img] : [], imageUrl: img, categoryId: tmpl?.category_id || 0,
+      categoryName: cat?.name_ru || '', cityId: memLink.city_id, cityName: memLink.city_name,
+      eventDate: memLink.event_date, eventTime: memLink.event_time,
+      venueAddress: memLink.venue_address, availableSeats: memLink.available_seats, price: 2490
     });
   } catch { res.status(500).json({ error: "Server error" }); }
 });
