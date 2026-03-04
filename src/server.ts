@@ -6,7 +6,8 @@ import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
 import { Pool } from "pg";
-import { initDatabase, getPool } from "./database";
+import { initDatabase, getPool, tryGetPool, isDbAvailable } from "./database";
+import { CATEGORIES, CITIES, EVENT_TEMPLATES, EVENT_TEMPLATE_IMAGES } from "./seedData";
 import {
   setupTelegramWebhook,
   sendChannelNotification,
@@ -645,11 +646,15 @@ app.post("/api/create-ticket-order", async (req, res) => {
 // ==================== SITE SETTINGS ====================
 app.get("/api/site-settings", async (_req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.query("SELECT * FROM site_settings ORDER BY id DESC LIMIT 1");
-    if (result.rows.length === 0) return res.json({ supportContact: "https://t.me/support", supportLabel: "Тех. поддержка" });
-    const row = result.rows[0];
-    res.json({ supportContact: row.support_contact || "https://t.me/support", supportLabel: row.support_label || "Тех. поддержка", chatScript: row.chat_script || defaultChatHtml });
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query("SELECT * FROM site_settings ORDER BY id DESC LIMIT 1");
+      if (result.rows.length > 0) {
+        const row = result.rows[0];
+        return res.json({ supportContact: row.support_contact || "https://t.me/support", supportLabel: row.support_label || "Тех. поддержка", chatScript: row.chat_script || defaultChatHtml });
+      }
+    }
+    res.json({ supportContact: "https://t.me/support", supportLabel: "Тех. поддержка", chatScript: "" });
   } catch { res.json({ supportContact: "https://t.me/support", supportLabel: "Тех. поддержка", chatScript: "" }); }
 });
 
@@ -670,17 +675,20 @@ app.post("/api/admin/site-settings", async (req, res) => {
 
 app.get("/api/admin/chat-status", async (_req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.query("SELECT chat_script FROM site_settings ORDER BY id DESC LIMIT 1");
-    if (result.rows.length === 0 || !result.rows[0].chat_script) return res.json({ active: false, provider: null });
-    const script = result.rows[0].chat_script;
-    let provider = "Неизвестный";
-    if (script.includes("livechat") || script.includes("LiveChat")) provider = "LiveChat";
-    else if (script.includes("tidio")) provider = "Tidio";
-    else if (script.includes("tawk")) provider = "Tawk.to";
-    else if (script.includes("jivosite") || script.includes("jivo")) provider = "JivoSite";
-    else if (script.includes("crisp")) provider = "Crisp";
-    res.json({ active: true, provider });
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query("SELECT chat_script FROM site_settings ORDER BY id DESC LIMIT 1");
+      if (result.rows.length === 0 || !result.rows[0].chat_script) return res.json({ active: false, provider: null });
+      const script = result.rows[0].chat_script;
+      let provider = "Неизвестный";
+      if (script.includes("livechat") || script.includes("LiveChat")) provider = "LiveChat";
+      else if (script.includes("tidio")) provider = "Tidio";
+      else if (script.includes("tawk")) provider = "Tawk.to";
+      else if (script.includes("jivosite") || script.includes("jivo")) provider = "JivoSite";
+      else if (script.includes("crisp")) provider = "Crisp";
+      return res.json({ active: true, provider });
+    }
+    res.json({ active: false, provider: null });
   } catch { res.json({ active: false, provider: null }); }
 });
 
@@ -697,11 +705,15 @@ app.post("/api/admin/chat-script", async (req, res) => {
 // ==================== PAYMENT SETTINGS ====================
 app.get("/api/payment-settings", async (_req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.query("SELECT * FROM payment_settings ORDER BY id DESC LIMIT 1");
-    if (result.rows.length === 0) return res.json({ cardNumber: "", cardHolderName: "", bankName: "", sbpEnabled: true });
-    const row = result.rows[0];
-    res.json({ cardNumber: row.card_number, cardHolderName: row.card_holder_name, bankName: row.bank_name, sbpEnabled: row.sbp_enabled !== false });
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query("SELECT * FROM payment_settings ORDER BY id DESC LIMIT 1");
+      if (result.rows.length > 0) {
+        const row = result.rows[0];
+        return res.json({ cardNumber: row.card_number, cardHolderName: row.card_holder_name, bankName: row.bank_name, sbpEnabled: row.sbp_enabled !== false });
+      }
+    }
+    res.json({ cardNumber: "", cardHolderName: "", bankName: "", sbpEnabled: true });
   } catch { res.json({ cardNumber: "", cardHolderName: "", bankName: "", sbpEnabled: true }); }
 });
 
@@ -853,52 +865,89 @@ app.post("/api/admin/my-payment-settings", async (req, res) => {
 // ==================== GENERATOR API ====================
 app.get("/api/generator/categories", async (_req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.query("SELECT id, name, name_ru FROM categories WHERE id IN (6,7,8,9,10,11,12,13) ORDER BY id");
-    res.json({ categories: result.rows });
-  } catch { res.json({ categories: [] }); }
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query("SELECT id, name, name_ru FROM categories WHERE id IN (6,7,8,9,10,11,12,13) ORDER BY id");
+      if (result.rows.length > 0) return res.json({ categories: result.rows });
+    }
+    res.json({ categories: CATEGORIES.filter(c => [6,7,8,9,10,11,12,13].includes(c.id)) });
+  } catch { res.json({ categories: CATEGORIES.filter(c => [6,7,8,9,10,11,12,13].includes(c.id)) }); }
 });
 
 app.get("/api/generator/cities", async (_req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.query("SELECT id, name FROM cities ORDER BY name");
-    res.json({ cities: result.rows });
-  } catch { res.json({ cities: [] }); }
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query("SELECT id, name FROM cities ORDER BY name");
+      if (result.rows.length > 0) return res.json({ cities: result.rows });
+    }
+    const sorted = [...CITIES].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    res.json({ cities: sorted });
+  } catch { res.json({ cities: [...CITIES].sort((a, b) => a.name.localeCompare(b.name, 'ru')) }); }
 });
 
 app.get("/api/generator/event-templates", async (req, res) => {
   try {
     const categoryId = req.query.category_id as string;
     const cityId = req.query.city_id as string;
-    const pool = getPool();
-    let result;
-    if (categoryId) result = await pool.query("SELECT id, name, description, is_active, ticket_image_url FROM event_templates WHERE category_id = $1 AND is_active = true ORDER BY name", [categoryId]);
-    else result = await pool.query("SELECT id, name, description, is_active, ticket_image_url FROM event_templates WHERE is_active = true ORDER BY name");
-    const templates = [];
-    for (const row of result.rows) {
-      const imgRes = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 1", [row.id]);
-      let linkCode = null;
-      if (cityId) {
-        const linkRes = await pool.query("SELECT link_code FROM generated_links WHERE event_template_id = $1 AND city_id = $2 AND is_active = true ORDER BY created_at DESC LIMIT 1", [row.id, cityId]);
-        if (linkRes.rows.length > 0) linkCode = linkRes.rows[0].link_code;
+    const pool = tryGetPool();
+    if (pool) {
+      let result;
+      if (categoryId) result = await pool.query("SELECT id, name, description, is_active, ticket_image_url FROM event_templates WHERE category_id = $1 AND is_active = true ORDER BY name", [categoryId]);
+      else result = await pool.query("SELECT id, name, description, is_active, ticket_image_url FROM event_templates WHERE is_active = true ORDER BY name");
+      if (result.rows.length > 0) {
+        const templates = [];
+        for (const row of result.rows) {
+          const imgRes = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 1", [row.id]);
+          let linkCode = null;
+          if (cityId) {
+            const linkRes = await pool.query("SELECT link_code FROM generated_links WHERE event_template_id = $1 AND city_id = $2 AND is_active = true ORDER BY created_at DESC LIMIT 1", [row.id, cityId]);
+            if (linkRes.rows.length > 0) linkCode = linkRes.rows[0].link_code;
+          }
+          templates.push({ id: row.id, name: row.name, description: row.description, is_active: row.is_active, image_url: imgRes.rows[0]?.image_url || null, ticket_image_url: row.ticket_image_url, link_code: linkCode });
+        }
+        return res.json({ templates });
       }
-      templates.push({ id: row.id, name: row.name, description: row.description, is_active: row.is_active, image_url: imgRes.rows[0]?.image_url || null, ticket_image_url: row.ticket_image_url, link_code: linkCode });
     }
+    let filtered = EVENT_TEMPLATES.filter(t => t.is_active);
+    if (categoryId) filtered = filtered.filter(t => t.category_id === parseInt(categoryId));
+    const templates = filtered.sort((a, b) => a.name.localeCompare(b.name, 'ru')).map(t => ({
+      id: t.id, name: t.name, description: t.description, is_active: t.is_active,
+      image_url: EVENT_TEMPLATE_IMAGES[t.id] || null, ticket_image_url: t.ticket_image_url, link_code: null
+    }));
     res.json({ templates });
-  } catch { res.json({ templates: [] }); }
+  } catch {
+    let filtered = EVENT_TEMPLATES.filter(t => t.is_active);
+    const categoryId = req.query.category_id as string;
+    if (categoryId) filtered = filtered.filter(t => t.category_id === parseInt(categoryId));
+    res.json({ templates: filtered.map(t => ({ id: t.id, name: t.name, description: t.description, is_active: t.is_active, image_url: EVENT_TEMPLATE_IMAGES[t.id] || null, ticket_image_url: t.ticket_image_url, link_code: null })) });
+  }
 });
 
 app.get("/api/generator/event-templates/:id", async (req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.query(`SELECT et.*, cat.name_ru as category_name FROM event_templates et JOIN categories cat ON et.category_id = cat.id WHERE et.id = $1`, [req.params.id]);
-    if (result.rows.length === 0) return res.status(404).json({ success: false, error: "Template not found" });
-    const imagesResult = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 5", [req.params.id]);
-    const images = imagesResult.rows.map(r => r.image_url);
-    const template = result.rows[0];
-    res.json({ success: true, template: { id: template.id, name: template.name, description: template.description, images, image_url: images[0] || template.image_url, ticket_image_url: template.ticket_image_url, categoryName: template.category_name, isActive: template.is_active } });
-  } catch { res.status(500).json({ success: false, error: "Failed to fetch template" }); }
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query(`SELECT et.*, cat.name_ru as category_name FROM event_templates et JOIN categories cat ON et.category_id = cat.id WHERE et.id = $1`, [req.params.id]);
+      if (result.rows.length > 0) {
+        const imagesResult = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 5", [req.params.id]);
+        const images = imagesResult.rows.map(r => r.image_url);
+        const template = result.rows[0];
+        return res.json({ success: true, template: { id: template.id, name: template.name, description: template.description, images, image_url: images[0] || template.image_url, ticket_image_url: template.ticket_image_url, categoryName: template.category_name, isActive: template.is_active } });
+      }
+    }
+    const tmpl = EVENT_TEMPLATES.find(t => t.id === parseInt(req.params.id));
+    if (!tmpl) return res.status(404).json({ success: false, error: "Template not found" });
+    const cat = CATEGORIES.find(c => c.id === tmpl.category_id);
+    const img = EVENT_TEMPLATE_IMAGES[tmpl.id] || null;
+    res.json({ success: true, template: { id: tmpl.id, name: tmpl.name, description: tmpl.description, images: img ? [img] : [], image_url: img, ticket_image_url: tmpl.ticket_image_url, categoryName: cat?.name_ru || '', isActive: tmpl.is_active } });
+  } catch {
+    const tmpl = EVENT_TEMPLATES.find(t => t.id === parseInt(req.params.id));
+    if (!tmpl) return res.status(404).json({ success: false, error: "Template not found" });
+    const cat = CATEGORIES.find(c => c.id === tmpl.category_id);
+    const img = EVENT_TEMPLATE_IMAGES[tmpl.id] || null;
+    res.json({ success: true, template: { id: tmpl.id, name: tmpl.name, description: tmpl.description, images: img ? [img] : [], image_url: img, ticket_image_url: tmpl.ticket_image_url, categoryName: cat?.name_ru || '', isActive: tmpl.is_active } });
+  }
 });
 
 app.get("/api/generator/event-template/:id", async (req, res) => {
@@ -977,9 +1026,12 @@ app.put("/api/generator/event-templates/:id/addresses", async (req, res) => {
 
 app.get("/api/generator/links", async (_req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.query(`SELECT gl.*, et.name as event_name, c.name as city_name FROM generated_links gl JOIN event_templates et ON gl.event_template_id = et.id JOIN cities c ON gl.city_id = c.id ORDER BY gl.created_at DESC LIMIT 50`);
-    res.json({ links: result.rows });
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query(`SELECT gl.*, et.name as event_name, c.name as city_name FROM generated_links gl JOIN event_templates et ON gl.event_template_id = et.id JOIN cities c ON gl.city_id = c.id ORDER BY gl.created_at DESC LIMIT 50`);
+      return res.json({ links: result.rows });
+    }
+    res.json({ links: [] });
   } catch { res.json({ links: [] }); }
 });
 
@@ -1199,10 +1251,13 @@ app.post("/api/admin/refund/create", async (req, res) => {
 app.get("/api/admin/refunds", async (req, res) => {
   if (!checkAdminToken(req, res)) return;
   try {
-    const pool = getPool();
-    const result = await pool.query("SELECT * FROM refund_links ORDER BY created_at DESC");
-    res.json({ refunds: result.rows });
-  } catch { res.status(500).json({ success: false, message: "Ошибка" }); }
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query("SELECT * FROM refund_links ORDER BY created_at DESC");
+      return res.json({ refunds: result.rows });
+    }
+    res.json({ refunds: [] });
+  } catch { res.json({ refunds: [] }); }
 });
 
 app.post("/api/admin/refunds/:id/toggle", async (req, res) => {
@@ -1230,15 +1285,22 @@ app.use(express.static(publicDir));
 async function start() {
   await initDatabase();
 
+  if (!isDbAvailable()) {
+    console.log("⚠️ Running in NO-DATABASE mode — categories, cities and events served from memory");
+    console.log("⚠️ To save orders/links, connect a PostgreSQL database via DATABASE_URL");
+  }
+
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
+    console.log(`✅ Server running on http://0.0.0.0:${PORT}`);
   });
 
-  setTimeout(() => {
-    setupTelegramWebhook().then(success => {
-      if (success) console.log("Telegram webhook initialized");
-    });
-  }, 3000);
+  if (process.env.TELEGRAM_GROUP_BOT_TOKEN && process.env.APP_URL && process.env.APP_URL !== "https://your-domain.com") {
+    setTimeout(() => {
+      setupTelegramWebhook().then(success => {
+        if (success) console.log("✅ Telegram webhook initialized");
+      });
+    }, 3000);
+  }
 }
 
 start().catch(console.error);
