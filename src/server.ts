@@ -1931,7 +1931,7 @@ async function start() {
     if (!process.env.APP_URL || process.env.APP_URL === "https://your-domain.com") {
       const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN;
       if (railwayDomain) {
-        process.env.APP_URL = `https://${replitDomain}`;
+        process.env.APP_URL = `https://${railwayDomain}`;
         console.log(`📡 Auto-detected Railway URL: ${process.env.APP_URL}`);
       }
     }
