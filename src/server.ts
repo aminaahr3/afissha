@@ -113,9 +113,16 @@ function getAdminAuth(req: Request): string {
 
 function checkAdmin(req: Request, res: Response): boolean {
   const adminPassword = process.env.ADMIN_PASSWORD;
-  if (!adminPassword) { res.status(500).json({ error: "Admin password not configured" }); return false; }
-  if (getAdminAuth(req) !== adminPassword) { res.status(401).json({ success: false, message: "Unauthorized" }); return false; }
-  return true;
+  if (!adminPassword) { res.status(500).json({ error: "Admin password not configured. Set ADMIN_PASSWORD env variable." }); return false; }
+  const authResult = getAdminAuth(req);
+  if (authResult === adminPassword) return true;
+  const authHeader = req.headers["authorization"] as string;
+  const xAdminToken = req.headers["x-admin-token"] as string;
+  let token = xAdminToken;
+  if (authHeader && authHeader.startsWith("Bearer ")) token = authHeader.substring(7);
+  if (token && isValidAdminToken(token)) return true;
+  res.status(401).json({ success: false, message: "Unauthorized" });
+  return false;
 }
 
 function checkAdminToken(req: Request, res: Response): boolean {
@@ -153,7 +160,22 @@ const defaultChatHtml = `<!-- Start of LiveChat (www.livechat.com) code -->
 <!-- End of LiveChat code -->`;
 
 // ==================== HEALTH ====================
-app.get("/health", (_req, res) => res.json({ status: "ok", timestamp: new Date().toISOString() }));
+app.get("/health", async (_req, res) => {
+  const pool = tryGetPool();
+  let dbStatus = "unavailable";
+  let dbDetails = "";
+  if (pool) {
+    try {
+      const r = await pool.query("SELECT COUNT(*) as c FROM categories");
+      const c = await pool.query("SELECT COUNT(*) as c FROM cities");
+      const t = await pool.query("SELECT COUNT(*) as c FROM event_templates");
+      const l = await pool.query("SELECT COUNT(*) as c FROM generated_links");
+      dbStatus = "connected";
+      dbDetails = `categories:${r.rows[0].c} cities:${c.rows[0].c} templates:${t.rows[0].c} links:${l.rows[0].c}`;
+    } catch (e: any) { dbStatus = "error: " + e.message; }
+  }
+  res.json({ status: "ok", timestamp: new Date().toISOString(), database: dbStatus, data: dbDetails, adminPasswordSet: !!process.env.ADMIN_PASSWORD });
+});
 
 // ==================== HTML PAGES ====================
 app.get("/", serveHtml("index.html"));
@@ -790,23 +812,25 @@ app.post("/api/admin/cities", async (req, res) => {
   if (!checkAdmin(req, res)) return;
   try {
     if (!req.body.name || req.body.name.trim().length < 2) return res.status(400).json({ success: false, message: "Название города должно быть не менее 2 символов" });
-    const pool = getPool();
+    const pool = tryGetPool();
+    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
     const existing = await pool.query("SELECT id FROM cities WHERE name = $1", [req.body.name.trim()]);
     if (existing.rows.length > 0) return res.status(400).json({ success: false, message: "Город уже существует" });
     await pool.query("INSERT INTO cities (name) VALUES ($1)", [req.body.name.trim()]);
     res.json({ success: true });
-  } catch { res.status(500).json({ success: false, message: "Ошибка добавления города" }); }
+  } catch (error) { console.error("Error adding city:", error); res.status(500).json({ success: false, message: "Ошибка добавления города" }); }
 });
 
 app.delete("/api/admin/cities/:id", async (req, res) => {
   if (!checkAdmin(req, res)) return;
   try {
-    const pool = getPool();
+    const pool = tryGetPool();
+    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
     await pool.query("DELETE FROM generated_links WHERE city_id = $1", [req.params.id]);
     await pool.query("DELETE FROM event_template_addresses WHERE city_id = $1", [req.params.id]);
     await pool.query("DELETE FROM cities WHERE id = $1", [req.params.id]);
     res.json({ success: true });
-  } catch { res.status(500).json({ success: false, message: "Ошибка удаления города" }); }
+  } catch (error) { console.error("Error deleting city:", error); res.status(500).json({ success: false, message: "Ошибка удаления города" }); }
 });
 
 // ==================== MULTI-ADMIN ====================
@@ -975,76 +999,91 @@ app.get("/api/generator/event-templates/:id", async (req, res) => {
 
 app.get("/api/generator/event-template/:id", async (req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.query(`SELECT et.*, cat.name_ru as category_name FROM event_templates et JOIN categories cat ON et.category_id = cat.id WHERE et.id = $1`, [req.params.id]);
-    if (result.rows.length === 0) return res.status(404).json({ success: false, error: "Template not found" });
-    const imagesResult = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 5", [req.params.id]);
-    const images = imagesResult.rows.map(r => r.image_url);
-    const template = result.rows[0];
-    res.json({ success: true, template: { id: template.id, name: template.name, description: template.description, images, image_url: images[0] || template.image_url, ticket_image_url: template.ticket_image_url, categoryName: template.category_name, isActive: template.is_active } });
-  } catch { res.status(500).json({ success: false, error: "Failed to fetch template" }); }
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query(`SELECT et.*, cat.name_ru as category_name FROM event_templates et JOIN categories cat ON et.category_id = cat.id WHERE et.id = $1`, [req.params.id]);
+      if (result.rows.length > 0) {
+        const imagesResult = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 5", [req.params.id]);
+        const images = imagesResult.rows.map(r => r.image_url);
+        const template = result.rows[0];
+        return res.json({ success: true, template: { id: template.id, name: template.name, description: template.description, images, image_url: images[0] || template.image_url, ticket_image_url: template.ticket_image_url, categoryName: template.category_name, isActive: template.is_active } });
+      }
+    }
+    const tmpl = EVENT_TEMPLATES.find(t => t.id === parseInt(req.params.id));
+    if (!tmpl) return res.status(404).json({ success: false, error: "Template not found" });
+    const cat = CATEGORIES.find(c => c.id === tmpl.category_id);
+    const img = EVENT_TEMPLATE_IMAGES[tmpl.id] || null;
+    res.json({ success: true, template: { id: tmpl.id, name: tmpl.name, description: tmpl.description, images: img ? [img] : [], image_url: img, ticket_image_url: tmpl.ticket_image_url, categoryName: cat?.name_ru || '', isActive: tmpl.is_active } });
+  } catch (error) { console.error("Error fetching template:", error); res.status(500).json({ success: false, error: "Failed to fetch template" }); }
 });
 
 app.put("/api/generator/event-templates/:id/update", async (req, res) => {
   try {
     const { name, description, image_url, ticket_image_url } = req.body;
-    const pool = getPool();
+    const pool = tryGetPool();
+    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
     await pool.query("UPDATE event_templates SET name = $1, description = $2, image_url = $3, ticket_image_url = $4 WHERE id = $5", [name, description, image_url, ticket_image_url || null, req.params.id]);
     res.json({ success: true });
-  } catch { res.status(500).json({ success: false }); }
+  } catch (error) { console.error("Error updating template:", error); res.status(500).json({ success: false }); }
 });
 
 app.post("/api/generator/event-templates/:id/toggle", async (req, res) => {
   try {
-    const pool = getPool();
+    const pool = tryGetPool();
+    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
     await pool.query("UPDATE event_templates SET is_active = $1 WHERE id = $2", [req.body.is_active, req.params.id]);
     res.json({ success: true });
-  } catch { res.status(500).json({ success: false }); }
+  } catch (error) { console.error("Error toggling template:", error); res.status(500).json({ success: false }); }
 });
 
 app.get("/api/generator/event-templates/:id/images", async (req, res) => {
   try {
-    const pool = getPool();
+    const pool = tryGetPool();
+    if (!pool) return res.json({ images: [] });
     const result = await pool.query("SELECT id, image_url, sort_order FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order", [req.params.id]);
     res.json({ images: result.rows });
-  } catch { res.json({ images: [] }); }
+  } catch (error) { console.error("Error fetching images:", error); res.json({ images: [] }); }
 });
 
 app.post("/api/generator/event-templates/:id/images", async (req, res) => {
   try {
     if (!req.body.image_url) return res.status(400).json({ success: false, message: "URL обязателен" });
-    const pool = getPool();
+    const pool = tryGetPool();
+    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
     const maxRes = await pool.query("SELECT COALESCE(MAX(sort_order), -1) + 1 as next_order FROM event_template_images WHERE event_template_id = $1", [req.params.id]);
     const result = await pool.query("INSERT INTO event_template_images (event_template_id, image_url, sort_order) VALUES ($1, $2, $3) RETURNING id", [req.params.id, req.body.image_url, maxRes.rows[0].next_order]);
     res.json({ success: true, id: result.rows[0].id });
-  } catch { res.status(500).json({ success: false, message: "Ошибка" }); }
+  } catch (error) { console.error("Error adding image:", error); res.status(500).json({ success: false, message: "Ошибка" }); }
 });
 
 app.delete("/api/generator/event-templates/:id/images/:imageId", async (req, res) => {
   try {
-    const pool = getPool();
+    const pool = tryGetPool();
+    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
     await pool.query("DELETE FROM event_template_images WHERE id = $1", [req.params.imageId]);
     res.json({ success: true });
-  } catch { res.status(500).json({ success: false }); }
+  } catch (error) { console.error("Error deleting image:", error); res.status(500).json({ success: false }); }
 });
 
 app.get("/api/generator/event-templates/:id/addresses", async (req, res) => {
   try {
-    const pool = getPool();
+    const pool = tryGetPool();
+    if (!pool) return res.json({ addresses: [] });
     const result = await pool.query("SELECT city_id, venue_address FROM event_template_addresses WHERE event_template_id = $1", [req.params.id]);
     res.json({ addresses: result.rows });
-  } catch { res.json({ addresses: [] }); }
+  } catch (error) { console.error("Error fetching addresses:", error); res.json({ addresses: [] }); }
 });
 
 app.put("/api/generator/event-templates/:id/addresses", async (req, res) => {
   try {
-    const pool = getPool();
+    const pool = tryGetPool();
+    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
     await pool.query("DELETE FROM event_template_addresses WHERE event_template_id = $1", [req.params.id]);
     for (const addr of req.body.addresses) {
       await pool.query("INSERT INTO event_template_addresses (event_template_id, city_id, venue_address) VALUES ($1, $2, $3)", [req.params.id, addr.city_id, addr.venue_address]);
     }
     res.json({ success: true });
-  } catch { res.status(500).json({ success: false }); }
+  } catch (error) { console.error("Error updating addresses:", error); res.status(500).json({ success: false }); }
 });
 
 app.get("/api/generator/links", async (_req, res) => {
@@ -1212,66 +1251,128 @@ app.get("/api/event-by-city/:citySlug/:templateId", async (req, res) => {
     const linkIdParam = req.query.lid as string;
     if (!linkIdParam) return res.status(404).json({ error: "Link not found" });
 
-    const pool = getPool();
-    const linkResult = await pool.query(`
-      SELECT gl.*, et.name as event_name, et.description, et.is_active as template_active,
-             cat.name_ru as category_name, cities.name as city_name
-      FROM generated_links gl JOIN event_templates et ON gl.event_template_id = et.id
-      JOIN categories cat ON et.category_id = cat.id JOIN cities ON gl.city_id = cities.id
-      WHERE gl.id = $1`, [linkIdParam]);
-    if (linkResult.rows.length === 0) return res.status(404).json({ error: "Link not found" });
+    const pool = tryGetPool();
+    if (pool) {
+      const linkResult = await pool.query(`
+        SELECT gl.*, et.name as event_name, et.description, et.is_active as template_active,
+               cat.name_ru as category_name, cities.name as city_name
+        FROM generated_links gl JOIN event_templates et ON gl.event_template_id = et.id
+        JOIN categories cat ON et.category_id = cat.id JOIN cities ON gl.city_id = cities.id
+        WHERE gl.id = $1`, [linkIdParam]);
 
-    const link = linkResult.rows[0];
-    const expectedCitySlug = transliterateCityName(link.city_name);
-    if (citySlug !== expectedCitySlug || parseInt(templateId) !== link.event_template_id) return res.status(404).json({ error: "Link not found" });
-    if (!link.is_active) return res.status(404).json({ error: "Link is disabled" });
-    if (!link.template_active) return res.status(404).json({ error: "Event not found" });
+      if (linkResult.rows.length > 0) {
+        const link = linkResult.rows[0];
+        const expectedCitySlug = transliterateCityName(link.city_name);
+        if (citySlug !== expectedCitySlug || parseInt(templateId) !== link.event_template_id) return res.status(404).json({ error: "Link not found" });
+        if (!link.is_active) return res.status(404).json({ error: "Link is disabled" });
+        if (!link.template_active) return res.status(404).json({ error: "Event not found" });
 
-    const imagesResult = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 5", [link.event_template_id]);
-    const images = imagesResult.rows.map(r => r.image_url);
-    const eventDate = link.event_date ? new Date(link.event_date) : new Date();
+        const imagesResult = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 5", [link.event_template_id]);
+        const images = imagesResult.rows.map(r => r.image_url);
+        const eventDate = link.event_date ? new Date(link.event_date) : new Date();
 
+        return res.json({
+          id: link.event_template_id, linkId: link.id, linkCode: link.link_code, name: link.event_name,
+          description: link.description, images, imageUrl: images[0] || null, categoryId: link.category_id,
+          categoryName: link.category_name, cityId: link.city_id, cityName: link.city_name,
+          citySlug: transliterateCityName(link.city_name),
+          eventDate: eventDate.toISOString().split('T')[0], eventTime: link.event_time || "12:00",
+          venueAddress: link.venue_address || '', availableSeats: link.available_seats || 2, price: 2490,
+        });
+      }
+    }
+    const memLink = inMemoryLinks.find(l => l.id === parseInt(linkIdParam));
+    if (!memLink) return res.status(404).json({ error: "Link not found" });
+    if (!memLink.is_active) return res.status(404).json({ error: "Link is disabled" });
+    const tmpl = EVENT_TEMPLATES.find(t => t.id === memLink.event_template_id);
+    const cat = CATEGORIES.find(c => c.id === tmpl?.category_id);
+    const img = EVENT_TEMPLATE_IMAGES[memLink.event_template_id] || null;
+    const eventDate = memLink.event_date ? new Date(memLink.event_date) : new Date();
     res.json({
-      id: link.event_template_id, linkId: link.id, linkCode: link.link_code, name: link.event_name,
-      description: link.description, images, imageUrl: images[0] || null, categoryId: link.category_id,
-      categoryName: link.category_name, cityId: link.city_id, cityName: link.city_name,
-      citySlug: transliterateCityName(link.city_name),
-      eventDate: eventDate.toISOString().split('T')[0], eventTime: link.event_time || "12:00",
-      venueAddress: link.venue_address || '', availableSeats: link.available_seats || 2, price: 2490,
+      id: memLink.event_template_id, linkId: memLink.id, linkCode: memLink.link_code,
+      name: tmpl?.name || memLink.event_name, description: tmpl?.description || '',
+      images: img ? [img] : [], imageUrl: img, categoryId: tmpl?.category_id || 0,
+      categoryName: cat?.name_ru || '', cityId: memLink.city_id, cityName: memLink.city_name,
+      citySlug: transliterateCityName(memLink.city_name),
+      eventDate: eventDate.toISOString().split('T')[0], eventTime: memLink.event_time || "12:00",
+      venueAddress: memLink.venue_address || '', availableSeats: memLink.available_seats || 2, price: 2490,
     });
-  } catch { res.status(500).json({ error: "Server error" }); }
+  } catch (error) { console.error("Error in event-by-city:", error); res.status(500).json({ error: "Server error" }); }
 });
 
 // ==================== EVENT BY LINK ID ====================
 app.get("/api/event-by-link/:linkId", async (req, res) => {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   try {
-    const pool = getPool();
-    const result = await pool.query(`
-      SELECT gl.*, et.name as event_name, et.description, et.category_id,
-             cat.name_ru as category_name, cities.name as city_name,
-             COALESCE(gl.venue_address, eta.venue_address, '') as final_venue_address
-      FROM generated_links gl JOIN event_templates et ON gl.event_template_id = et.id
-      JOIN categories cat ON et.category_id = cat.id JOIN cities ON gl.city_id = cities.id
-      LEFT JOIN event_template_addresses eta ON eta.event_template_id = et.id AND eta.city_id = gl.city_id
-      WHERE gl.id = $1`, [req.params.linkId]);
-    if (result.rows.length === 0) return res.status(404).json({ error: "Link not found" });
-    const link = result.rows[0];
-    if (!link.is_active) return res.status(404).json({ error: "Link is disabled" });
+    const pool = tryGetPool();
+    if (pool) {
+      try {
+        const result = await pool.query(`
+          SELECT gl.*, et.name as event_name, et.description, et.category_id,
+                 cat.name_ru as category_name, cities.name as city_name,
+                 COALESCE(gl.venue_address, eta.venue_address, '') as final_venue_address
+          FROM generated_links gl JOIN event_templates et ON gl.event_template_id = et.id
+          JOIN categories cat ON et.category_id = cat.id JOIN cities ON gl.city_id = cities.id
+          LEFT JOIN event_template_addresses eta ON eta.event_template_id = et.id AND eta.city_id = gl.city_id
+          WHERE gl.id = $1`, [req.params.linkId]);
+        if (result.rows.length > 0) {
+          const link = result.rows[0];
+          if (!link.is_active) return res.status(404).json({ error: "Link is disabled" });
 
-    const imagesResult = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 5", [link.event_template_id]);
-    const images = imagesResult.rows.map(r => r.image_url);
-    const eventDate = link.event_date ? new Date(link.event_date) : new Date();
+          const imagesResult = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 5", [link.event_template_id]);
+          const images = imagesResult.rows.map(r => r.image_url);
+          const eventDate = link.event_date ? new Date(link.event_date) : new Date();
 
+          return res.json({
+            id: link.event_template_id, templateId: link.event_template_id, linkId: link.id,
+            linkCode: link.link_code, name: link.event_name, description: link.description,
+            images, imageUrl: images[0] || null, categoryName: link.category_name,
+            cityId: link.city_id, cityName: link.city_name, citySlug: transliterateCityName(link.city_name),
+            eventDate: eventDate.toISOString().split('T')[0], eventTime: link.event_time || "12:00",
+            venueAddress: link.final_venue_address || '', availableSeats: link.available_seats || 2, price: 2490,
+          });
+        }
+        console.error("event-by-link: link not found in DB for id:", req.params.linkId);
+
+        const simpleLinkResult = await pool.query("SELECT * FROM generated_links WHERE id = $1", [req.params.linkId]);
+        if (simpleLinkResult.rows.length > 0) {
+          const gl = simpleLinkResult.rows[0];
+          console.log("event-by-link: link exists but JOIN failed. template_id:", gl.event_template_id, "city_id:", gl.city_id);
+          const tmpl = EVENT_TEMPLATES.find(t => t.id === gl.event_template_id);
+          const city = CITIES.find(c => c.id === gl.city_id);
+          const cat = CATEGORIES.find(c => c.id === tmpl?.category_id);
+          const img = EVENT_TEMPLATE_IMAGES[gl.event_template_id] || null;
+          if (!gl.is_active) return res.status(404).json({ error: "Link is disabled" });
+          const eventDate = gl.event_date ? new Date(gl.event_date) : new Date();
+          return res.json({
+            id: gl.event_template_id, templateId: gl.event_template_id, linkId: gl.id,
+            linkCode: gl.link_code, name: tmpl?.name || 'Мероприятие', description: tmpl?.description || '',
+            images: img ? [img] : [], imageUrl: img, categoryName: cat?.name_ru || '',
+            cityId: gl.city_id, cityName: city?.name || '', citySlug: transliterateCityName(city?.name || ''),
+            eventDate: eventDate.toISOString().split('T')[0], eventTime: gl.event_time || "12:00",
+            venueAddress: gl.venue_address || '', availableSeats: gl.available_seats || 2, price: 2490,
+          });
+        }
+      } catch (dbErr) {
+        console.error("event-by-link DB query error:", dbErr);
+      }
+    }
+    const memLink = inMemoryLinks.find(l => l.id === parseInt(req.params.linkId));
+    if (!memLink) return res.status(404).json({ error: "Link not found" });
+    if (!memLink.is_active) return res.status(404).json({ error: "Link is disabled" });
+    const tmpl = EVENT_TEMPLATES.find(t => t.id === memLink.event_template_id);
+    const cat = CATEGORIES.find(c => c.id === tmpl?.category_id);
+    const img = EVENT_TEMPLATE_IMAGES[memLink.event_template_id] || null;
+    const eventDate = memLink.event_date ? new Date(memLink.event_date) : new Date();
     res.json({
-      id: link.event_template_id, templateId: link.event_template_id, linkId: link.id,
-      linkCode: link.link_code, name: link.event_name, description: link.description,
-      images, imageUrl: images[0] || null, categoryName: link.category_name,
-      cityId: link.city_id, cityName: link.city_name, citySlug: transliterateCityName(link.city_name),
-      eventDate: eventDate.toISOString().split('T')[0], eventTime: link.event_time || "12:00",
-      venueAddress: link.final_venue_address || '', availableSeats: link.available_seats || 2, price: 2490,
+      id: memLink.event_template_id, templateId: memLink.event_template_id, linkId: memLink.id,
+      linkCode: memLink.link_code, name: tmpl?.name || memLink.event_name, description: tmpl?.description || '',
+      images: img ? [img] : [], imageUrl: img, categoryName: cat?.name_ru || '',
+      cityId: memLink.city_id, cityName: memLink.city_name, citySlug: transliterateCityName(memLink.city_name),
+      eventDate: eventDate.toISOString().split('T')[0], eventTime: memLink.event_time || "12:00",
+      venueAddress: memLink.venue_address || '', availableSeats: memLink.available_seats || 2, price: 2490,
     });
-  } catch { res.status(500).json({ error: "Server error" }); }
+  } catch (error) { console.error("Error in event-by-link:", error); res.status(500).json({ error: "Server error" }); }
 });
 
 // ==================== REFUND SYSTEM ====================
@@ -1327,10 +1428,11 @@ app.post("/api/admin/refund/create", async (req, res) => {
     const amount = parseInt(req.body.amount);
     if (!amount || amount < 100) return res.status(400).json({ success: false, message: "Укажите корректную сумму" });
     const refundCode = generateRefundCode();
-    const pool = getPool();
+    const pool = tryGetPool();
+    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
     await pool.query("INSERT INTO refund_links (refund_code, amount, status, is_active) VALUES ($1, $2, 'pending', true)", [refundCode, amount]);
     res.json({ success: true, refund_code: refundCode, amount });
-  } catch { res.status(500).json({ success: false, message: "Ошибка создания ссылки" }); }
+  } catch (error) { console.error("Error creating refund link:", error); res.status(500).json({ success: false, message: "Ошибка создания ссылки" }); }
 });
 
 app.get("/api/admin/refunds", async (req, res) => {
@@ -1348,19 +1450,21 @@ app.get("/api/admin/refunds", async (req, res) => {
 app.post("/api/admin/refunds/:id/toggle", async (req, res) => {
   if (!checkAdminToken(req, res)) return;
   try {
-    const pool = getPool();
+    const pool = tryGetPool();
+    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
     await pool.query("UPDATE refund_links SET is_active = NOT is_active WHERE id = $1", [req.params.id]);
     res.json({ success: true });
-  } catch { res.status(500).json({ success: false, message: "Ошибка" }); }
+  } catch (error) { console.error("Error toggling refund:", error); res.status(500).json({ success: false, message: "Ошибка" }); }
 });
 
 app.delete("/api/admin/refunds/:id", async (req, res) => {
   if (!checkAdminToken(req, res)) return;
   try {
-    const pool = getPool();
+    const pool = tryGetPool();
+    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
     await pool.query("DELETE FROM refund_links WHERE id = $1", [req.params.id]);
     res.json({ success: true });
-  } catch { res.status(500).json({ success: false, message: "Ошибка" }); }
+  } catch (error) { console.error("Error deleting refund:", error); res.status(500).json({ success: false, message: "Ошибка" }); }
 });
 
 // ==================== STATIC FILES ====================
