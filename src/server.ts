@@ -591,76 +591,93 @@ app.post("/webhooks/telegram/action", async (req, res) => {
       const orderId = parseInt(orderIdStr);
       if (isNaN(orderId)) { await answerCallbackQuery(callbackQuery.id, "❌ Ошибка: неверный ID заказа"); return res.send("OK"); }
 
-      const pool = tryGetPool();
-      let row: any = null;
+      try {
+        const pool = tryGetPool();
+        let row: any = null;
 
-      if (pool) {
-        let orderResult = await pool.query(
-          `SELECT o.*, e.name as event_name, e.date::text as event_date, e.time::text as event_time,
-                  c.name_ru as category_name, COALESCE(ci.name, ci2.name) as city_name
-           FROM orders o LEFT JOIN events e ON o.event_id = e.id LEFT JOIN categories c ON e.category_id = c.id
-           LEFT JOIN cities ci ON e.city_id = ci.id LEFT JOIN cities ci2 ON o.city_id = ci2.id
-           WHERE o.id = $1 AND o.event_id IS NOT NULL`, [orderId]);
-        if (orderResult.rows.length === 0) {
-          orderResult = await pool.query(
-            `SELECT o.*, et.name as event_name,
-                    COALESCE(o.event_date::text, gl.event_date::text) as event_date,
-                    COALESCE(o.event_time::text, gl.event_time::text) as event_time,
-                    cat.name_ru as category_name, COALESCE(ci2.name, ci.name) as city_name
-             FROM orders o LEFT JOIN event_templates et ON o.event_template_id = et.id
-             LEFT JOIN categories cat ON et.category_id = cat.id
-             LEFT JOIN generated_links gl ON gl.link_code = o.link_code
-             LEFT JOIN cities ci ON gl.city_id = ci.id
-             LEFT JOIN cities ci2 ON o.city_id = ci2.id WHERE o.id = $1`, [orderId]);
-        }
-        if (orderResult.rows.length > 0) row = orderResult.rows[0];
-      } else {
-        const memOrder = inMemoryOrders.find(o => o.id === orderId);
-        if (memOrder) row = { id: memOrder.id, order_code: memOrder.order_code, event_name: memOrder.event_name, event_date: memOrder.event_date, event_time: memOrder.event_time, category_name: '', city_name: memOrder.city_name, customer_name: memOrder.customer_name, customer_phone: memOrder.customer_phone, seats_count: memOrder.seats_count, total_price: memOrder.total_price, status: memOrder.status, payment_status: memOrder.payment_status, tickets_json: memOrder.tickets_json, event_id: memOrder.event_id };
-      }
-
-      if (!row) { await answerCallbackQuery(callbackQuery.id, "❌ Заказ не найден"); return res.send("OK"); }
-
-      let ticketsData: Record<string, number> | undefined;
-      if (row.tickets_json) { try { ticketsData = JSON.parse(row.tickets_json); } catch {} }
-
-      const order = {
-        id: row.id, orderCode: row.order_code, eventName: row.event_name || 'Мероприятие',
-        categoryName: row.category_name || '', cityName: row.city_name || '',
-        eventDate: row.event_date, eventTime: row.event_time,
-        customerName: row.customer_name, customerPhone: row.customer_phone,
-        seatsCount: row.seats_count, totalPrice: parseFloat(row.total_price) || 0,
-        status: row.status, paymentStatus: row.payment_status, tickets: ticketsData,
-      };
-
-      if (action === "confirm") {
-        if (pool) await pool.query("UPDATE orders SET payment_status = 'confirmed', status = 'confirmed', updated_at = NOW() WHERE id = $1", [orderId]);
-        else { const mo = inMemoryOrders.find(o => o.id === orderId); if (mo) { mo.payment_status = 'confirmed'; mo.status = 'confirmed'; } }
-      } else if (action === "reject") {
         if (pool) {
-          await pool.query("UPDATE orders SET payment_status = 'rejected', status = 'rejected', updated_at = NOW() WHERE id = $1", [orderId]);
-          if (row.event_id) await pool.query("UPDATE events SET available_seats = available_seats + $1 WHERE id = $2", [row.seats_count, row.event_id]);
-        } else {
-          const mo = inMemoryOrders.find(o => o.id === orderId); if (mo) { mo.payment_status = 'rejected'; mo.status = 'rejected'; }
-          if (row.event_id) { const me = inMemoryEvents.find(e => e.id === row.event_id); if (me) me.available_seats += row.seats_count; }
+          try {
+            let orderResult = await pool.query(
+              `SELECT o.*, e.name as event_name, e.date::text as event_date, e.time::text as event_time,
+                      c.name_ru as category_name, COALESCE(ci.name, ci2.name) as city_name
+               FROM orders o LEFT JOIN events e ON o.event_id = e.id LEFT JOIN categories c ON e.category_id = c.id
+               LEFT JOIN cities ci ON e.city_id = ci.id LEFT JOIN cities ci2 ON o.city_id = ci2.id
+               WHERE o.id = $1 AND o.event_id IS NOT NULL`, [orderId]);
+            if (orderResult.rows.length === 0) {
+              orderResult = await pool.query(
+                `SELECT o.*, et.name as event_name,
+                        COALESCE(o.event_date::text, gl.event_date::text) as event_date,
+                        COALESCE(o.event_time::text, gl.event_time::text) as event_time,
+                        cat.name_ru as category_name, COALESCE(ci2.name, ci.name) as city_name
+                 FROM orders o LEFT JOIN event_templates et ON o.event_template_id = et.id
+                 LEFT JOIN categories cat ON et.category_id = cat.id
+                 LEFT JOIN generated_links gl ON gl.link_code = o.link_code
+                 LEFT JOIN cities ci ON gl.city_id = ci.id
+                 LEFT JOIN cities ci2 ON o.city_id = ci2.id WHERE o.id = $1`, [orderId]);
+            }
+            if (orderResult.rows.length > 0) row = orderResult.rows[0];
+          } catch (dbErr) {
+            console.error("DB error finding order for callback, trying in-memory:", dbErr);
+          }
         }
-      } else { await answerCallbackQuery(callbackQuery.id, "❌ Неизвестное действие"); return res.send("OK"); }
 
-      const status = action === "confirm" ? "confirmed" : "rejected";
-      const originalText = callbackQuery.message?.caption || callbackQuery.message?.text || '';
-      const isPhoto = !!callbackQuery.message?.photo;
-      await updateOrderMessageStatus(chatId, messageId, order.orderCode, status, adminUsername, originalText, isPhoto);
-      await answerCallbackQuery(callbackQuery.id, action === "confirm" ? "✅ Оплата подтверждена!" : "❌ Заказ отклонён");
+        if (!row) {
+          const memOrder = inMemoryOrders.find(o => o.id === orderId);
+          if (memOrder) row = { id: memOrder.id, order_code: memOrder.order_code, event_name: memOrder.event_name, event_date: memOrder.event_date, event_time: memOrder.event_time, category_name: '', city_name: memOrder.city_name, customer_name: memOrder.customer_name, customer_phone: memOrder.customer_phone, seats_count: memOrder.seats_count, total_price: memOrder.total_price, status: memOrder.status, payment_status: memOrder.payment_status, tickets_json: memOrder.tickets_json, event_id: memOrder.event_id };
+        }
 
-      const channelData = {
-        orderId: order.id, orderCode: order.orderCode, eventName: order.eventName,
-        eventDate: order.eventDate || "", eventTime: order.eventTime || "",
-        cityName: order.cityName || "Москва", customerName: order.customerName,
-        customerPhone: order.customerPhone, seatsCount: order.seatsCount,
-        totalPrice: order.totalPrice, tickets: order.tickets,
-      };
-      if (action === "confirm") await sendChannelPaymentConfirmed(channelData);
-      else await sendChannelPaymentRejected(channelData);
+        if (!row) { await answerCallbackQuery(callbackQuery.id, "❌ Заказ не найден"); return res.send("OK"); }
+
+        let ticketsData: Record<string, number> | undefined;
+        if (row.tickets_json) { try { ticketsData = JSON.parse(row.tickets_json); } catch {} }
+
+        const order = {
+          id: row.id, orderCode: row.order_code, eventName: row.event_name || 'Мероприятие',
+          categoryName: row.category_name || '', cityName: row.city_name || '',
+          eventDate: row.event_date, eventTime: row.event_time,
+          customerName: row.customer_name, customerPhone: row.customer_phone,
+          seatsCount: row.seats_count, totalPrice: parseFloat(row.total_price) || 0,
+          status: row.status, paymentStatus: row.payment_status, tickets: ticketsData,
+        };
+
+        if (action === "confirm") {
+          if (pool) {
+            try { await pool.query("UPDATE orders SET payment_status = 'confirmed', status = 'confirmed', updated_at = NOW() WHERE id = $1", [orderId]); }
+            catch (e) { console.error("DB error confirming order:", e); }
+          }
+          const mo = inMemoryOrders.find(o => o.id === orderId);
+          if (mo) { mo.payment_status = 'confirmed'; mo.status = 'confirmed'; }
+        } else if (action === "reject") {
+          if (pool) {
+            try {
+              await pool.query("UPDATE orders SET payment_status = 'rejected', status = 'rejected', updated_at = NOW() WHERE id = $1", [orderId]);
+              if (row.event_id) await pool.query("UPDATE events SET available_seats = available_seats + $1 WHERE id = $2", [row.seats_count, row.event_id]);
+            } catch (e) { console.error("DB error rejecting order:", e); }
+          }
+          const mo = inMemoryOrders.find(o => o.id === orderId);
+          if (mo) { mo.payment_status = 'rejected'; mo.status = 'rejected'; }
+          if (row.event_id) { const me = inMemoryEvents.find(e => e.id === row.event_id); if (me) me.available_seats += row.seats_count; }
+        } else { await answerCallbackQuery(callbackQuery.id, "❌ Неизвестное действие"); return res.send("OK"); }
+
+        const status = action === "confirm" ? "confirmed" : "rejected";
+        const originalText = callbackQuery.message?.caption || callbackQuery.message?.text || '';
+        const isPhoto = !!callbackQuery.message?.photo;
+        await updateOrderMessageStatus(chatId, messageId, order.orderCode, status, adminUsername, originalText, isPhoto);
+        await answerCallbackQuery(callbackQuery.id, action === "confirm" ? "✅ Оплата подтверждена!" : "❌ Заказ отклонён");
+
+        const channelData = {
+          orderId: order.id, orderCode: order.orderCode, eventName: order.eventName,
+          eventDate: order.eventDate || "", eventTime: order.eventTime || "",
+          cityName: order.cityName || "Москва", customerName: order.customerName,
+          customerPhone: order.customerPhone, seatsCount: order.seatsCount,
+          totalPrice: order.totalPrice, tickets: order.tickets,
+        };
+        if (action === "confirm") await sendChannelPaymentConfirmed(channelData);
+        else await sendChannelPaymentRejected(channelData);
+      } catch (orderErr) {
+        console.error("Error processing order callback:", orderErr);
+        try { await answerCallbackQuery(callbackQuery.id, "❌ Ошибка при обработке заказа"); } catch {}
+      }
     }
 
     return res.send("OK");
