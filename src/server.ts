@@ -597,17 +597,21 @@ app.post("/webhooks/telegram/action", async (req, res) => {
       if (pool) {
         let orderResult = await pool.query(
           `SELECT o.*, e.name as event_name, e.date::text as event_date, e.time::text as event_time,
-                  c.name_ru as category_name, ci.name as city_name
+                  c.name_ru as category_name, COALESCE(ci.name, ci2.name) as city_name
            FROM orders o LEFT JOIN events e ON o.event_id = e.id LEFT JOIN categories c ON e.category_id = c.id
-           LEFT JOIN cities ci ON e.city_id = ci.id WHERE o.id = $1`, [orderId]);
+           LEFT JOIN cities ci ON e.city_id = ci.id LEFT JOIN cities ci2 ON o.city_id = ci2.id
+           WHERE o.id = $1 AND o.event_id IS NOT NULL`, [orderId]);
         if (orderResult.rows.length === 0) {
           orderResult = await pool.query(
-            `SELECT o.*, et.name as event_name, gl.event_date::text as event_date, gl.event_time::text as event_time,
-                    cat.name_ru as category_name, ci.name as city_name
+            `SELECT o.*, et.name as event_name,
+                    COALESCE(o.event_date::text, gl.event_date::text) as event_date,
+                    COALESCE(o.event_time::text, gl.event_time::text) as event_time,
+                    cat.name_ru as category_name, COALESCE(ci2.name, ci.name) as city_name
              FROM orders o LEFT JOIN event_templates et ON o.event_template_id = et.id
              LEFT JOIN categories cat ON et.category_id = cat.id
              LEFT JOIN generated_links gl ON gl.link_code = o.link_code
-             LEFT JOIN cities ci ON COALESCE(o.city_id, gl.city_id) = ci.id WHERE o.id = $1`, [orderId]);
+             LEFT JOIN cities ci ON gl.city_id = ci.id
+             LEFT JOIN cities ci2 ON o.city_id = ci2.id WHERE o.id = $1`, [orderId]);
         }
         if (orderResult.rows.length > 0) row = orderResult.rows[0];
       } else {
