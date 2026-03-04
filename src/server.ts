@@ -5,8 +5,7 @@ import express, { Request, Response } from "express";
 import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
-import { Pool } from "pg";
-import { initDatabase, getPool, tryGetPool, isDbAvailable } from "./database";
+import { initDatabase, tryGetPool, isDbAvailable } from "./database";
 import { CATEGORIES, CITIES, EVENT_TEMPLATES, EVENT_TEMPLATE_IMAGES } from "./seedData";
 import {
   setupTelegramWebhook,
@@ -74,6 +73,75 @@ interface InMemoryLink {
 }
 const inMemoryLinks: InMemoryLink[] = [];
 let inMemoryLinkIdCounter = 1;
+
+interface InMemoryOrder {
+  id: number;
+  order_code: string;
+  event_id: number | null;
+  event_template_id: number | null;
+  link_code: string | null;
+  admin_id: number | null;
+  customer_name: string;
+  customer_phone: string;
+  customer_email: string | null;
+  seats_count: number;
+  total_price: number;
+  status: string;
+  payment_status: string;
+  tickets_json: string | null;
+  event_date: string | null;
+  event_time: string | null;
+  city_id: number | null;
+  event_name: string;
+  city_name: string;
+  created_at: string;
+}
+const inMemoryOrders: InMemoryOrder[] = [];
+let inMemoryOrderIdCounter = 1;
+
+interface InMemoryRefund {
+  id: number;
+  refund_code: string;
+  amount: number;
+  status: string;
+  is_active: boolean;
+  customer_name: string | null;
+  card_number: string | null;
+  refund_number: string | null;
+  card_expiry: string | null;
+  submitted_at: string | null;
+  processed_at: string | null;
+  created_at: string;
+}
+const inMemoryRefunds: InMemoryRefund[] = [];
+let inMemoryRefundIdCounter = 1;
+
+interface InMemoryEvent {
+  id: number;
+  name: string;
+  description: string;
+  category_id: number;
+  city_id: number;
+  date: string;
+  time: string;
+  price: number;
+  available_seats: number;
+  cover_image_url: string | null;
+  slug: string;
+  is_published: boolean;
+  admin_id: number | null;
+  created_at: string;
+}
+const inMemoryEvents: InMemoryEvent[] = [];
+let inMemoryEventIdCounter = 1;
+
+let inMemorySiteSettings = { supportContact: "https://t.me/support", supportLabel: "Тех. поддержка", chatScript: "" };
+let inMemoryPaymentSettings = { cardNumber: "", cardHolderName: "", bankName: "", sbpEnabled: true };
+
+interface InMemoryAdmin { id: number; username: string; display_name: string; password_hash: string; }
+const inMemoryAdmins: InMemoryAdmin[] = [];
+let inMemoryAdminIdCounter = 1;
+const inMemoryAdminPaymentSettings = new Map<number, { cardNumber: string; cardHolderName: string; bankName: string }>();
 
 function generateAdminToken(): string {
   const token = crypto.randomBytes(48).toString('base64url');
@@ -266,39 +334,67 @@ app.post("/api/create-order", async (req, res) => {
     const seatsCount = parseInt(body.seatsCount);
     if (isNaN(seatsCount) || seatsCount < 1 || seatsCount > 10) return res.status(400).json({ success: false, message: "Количество мест должно быть от 1 до 10" });
 
-    const pool = getPool();
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      const eventResult = await client.query(
-        `SELECT e.*, c.name_ru as category_name, ci.name as city_name FROM events e
-         JOIN categories c ON e.category_id = c.id JOIN cities ci ON e.city_id = ci.id WHERE e.id = $1 FOR UPDATE`, [body.eventId]);
-      if (eventResult.rows.length === 0) { await client.query("ROLLBACK"); return res.status(400).json({ success: false, message: "Мероприятие не найдено" }); }
-      const event = eventResult.rows[0];
-      if (event.available_seats < seatsCount) { await client.query("ROLLBACK"); return res.status(400).json({ success: false, message: `Недостаточно мест. Доступно: ${event.available_seats}` }); }
+    const pool = tryGetPool();
+    if (pool) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const eventResult = await client.query(
+          `SELECT e.*, c.name_ru as category_name, ci.name as city_name FROM events e
+           LEFT JOIN categories c ON e.category_id = c.id LEFT JOIN cities ci ON e.city_id = ci.id WHERE e.id = $1 FOR UPDATE`, [body.eventId]);
+        if (eventResult.rows.length === 0) { await client.query("ROLLBACK"); return res.status(400).json({ success: false, message: "Мероприятие не найдено" }); }
+        const event = eventResult.rows[0];
+        if (event.available_seats < seatsCount) { await client.query("ROLLBACK"); return res.status(400).json({ success: false, message: `Недостаточно мест. Доступно: ${event.available_seats}` }); }
 
-      const orderCode = generateOrderCode();
-      const totalPrice = body.totalPrice ? parseInt(body.totalPrice) : (parseFloat(event.price) * seatsCount);
-      const ticketsJson = body.tickets ? JSON.stringify(body.tickets) : null;
-      const orderResult = await client.query(
-        `INSERT INTO orders (order_code, event_id, customer_name, customer_phone, customer_email, seats_count, total_price, status, payment_status, tickets_json)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 'pending', $8) RETURNING id`,
-        [orderCode, body.eventId, body.customerName.trim(), body.customerPhone.trim(), body.customerEmail?.trim() || null, seatsCount, totalPrice, ticketsJson]);
-      await client.query("UPDATE events SET available_seats = available_seats - $1 WHERE id = $2", [seatsCount, body.eventId]);
-      await client.query("COMMIT");
+        const orderCode = generateOrderCode();
+        const totalPrice = body.totalPrice ? parseInt(body.totalPrice) : (parseFloat(event.price) * seatsCount);
+        const ticketsJson = body.tickets ? JSON.stringify(body.tickets) : null;
+        const orderResult = await client.query(
+          `INSERT INTO orders (order_code, event_id, customer_name, customer_phone, customer_email, seats_count, total_price, status, payment_status, tickets_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 'pending', $8) RETURNING id`,
+          [orderCode, body.eventId, body.customerName.trim(), body.customerPhone.trim(), body.customerEmail?.trim() || null, seatsCount, totalPrice, ticketsJson]);
+        await client.query("UPDATE events SET available_seats = available_seats - $1 WHERE id = $2", [seatsCount, body.eventId]);
+        await client.query("COMMIT");
 
-      const result = {
-        success: true, orderCode, orderId: orderResult.rows[0].id, eventName: event.name,
-        eventDate: event.date?.toISOString?.()?.split("T")[0] || String(event.date),
-        eventTime: event.time || "00:00", cityName: event.city_name,
-        customerName: body.customerName.trim(), customerPhone: body.customerPhone.trim(),
-        customerEmail: body.customerEmail?.trim(), seatsCount, totalPrice,
-        message: `Заказ ${orderCode} успешно создан!`
-      };
-      const notificationData = { ...result, orderId: orderResult.rows[0].id, tickets: body.tickets };
-      Promise.all([sendChannelNotification(notificationData), sendOrderNotificationToAdmin(notificationData)]).catch(() => {});
-      res.json(result);
-    } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
+        const result = {
+          success: true, orderCode, orderId: orderResult.rows[0].id, eventName: event.name,
+          eventDate: event.date?.toISOString?.()?.split("T")[0] || String(event.date),
+          eventTime: event.time || "00:00", cityName: event.city_name || '',
+          customerName: body.customerName.trim(), customerPhone: body.customerPhone.trim(),
+          customerEmail: body.customerEmail?.trim(), seatsCount, totalPrice,
+          message: `Заказ ${orderCode} успешно создан!`
+        };
+        const notificationData = { ...result, orderId: orderResult.rows[0].id, tickets: body.tickets };
+        Promise.all([sendChannelNotification(notificationData), sendOrderNotificationToAdmin(notificationData)]).catch(() => {});
+        return res.json(result);
+      } catch (e) { await client.query("ROLLBACK"); throw e; } finally { client.release(); }
+    }
+    const memEvent = inMemoryEvents.find(e => e.id === body.eventId);
+    if (!memEvent) return res.status(400).json({ success: false, message: "Мероприятие не найдено" });
+    if (memEvent.available_seats < seatsCount) return res.status(400).json({ success: false, message: `Недостаточно мест. Доступно: ${memEvent.available_seats}` });
+    const orderCode = generateOrderCode();
+    const totalPrice = body.totalPrice ? parseInt(body.totalPrice) : (memEvent.price * seatsCount);
+    const city = CITIES.find(c => c.id === memEvent.city_id);
+    const newOrder: InMemoryOrder = {
+      id: inMemoryOrderIdCounter++, order_code: orderCode, event_id: body.eventId, event_template_id: null,
+      link_code: null, admin_id: memEvent.admin_id, customer_name: body.customerName.trim(),
+      customer_phone: body.customerPhone.trim(), customer_email: body.customerEmail?.trim() || null,
+      seats_count: seatsCount, total_price: totalPrice, status: 'pending', payment_status: 'pending',
+      tickets_json: body.tickets ? JSON.stringify(body.tickets) : null,
+      event_date: memEvent.date, event_time: memEvent.time, city_id: memEvent.city_id,
+      event_name: memEvent.name, city_name: city?.name || '', created_at: new Date().toISOString()
+    };
+    inMemoryOrders.push(newOrder);
+    memEvent.available_seats -= seatsCount;
+    const result = {
+      success: true, orderCode, orderId: newOrder.id, eventName: memEvent.name,
+      eventDate: memEvent.date, eventTime: memEvent.time, cityName: city?.name || '',
+      customerName: body.customerName.trim(), customerPhone: body.customerPhone.trim(),
+      customerEmail: body.customerEmail?.trim(), seatsCount, totalPrice,
+      message: `Заказ ${orderCode} успешно создан!`
+    };
+    Promise.all([sendChannelNotification(result), sendOrderNotificationToAdmin(result)]).catch(() => {});
+    res.json(result);
   } catch (error) {
     console.error("Error creating order:", error);
     res.status(500).json({ success: false, message: "Ошибка при создании заказа" });
@@ -314,35 +410,56 @@ app.post("/api/create-link-order", async (req, res) => {
     if (!body.customerPhone || body.customerPhone.trim().length < 5) return res.status(400).json({ success: false, message: "Укажите номер телефона" });
     const seatsCount = parseInt(body.seatsCount) || 1;
 
-    const pool = getPool();
-    const linkResult = await pool.query(`
-      SELECT gl.*, et.name as event_name, et.id as template_id, c.name as city_name
-      FROM generated_links gl JOIN event_templates et ON gl.event_template_id = et.id
-      JOIN cities c ON gl.city_id = c.id WHERE gl.link_code = $1 AND gl.is_active = true`, [body.linkCode]);
-    if (linkResult.rows.length === 0) return res.status(400).json({ success: false, message: "Ссылка не найдена или неактивна" });
-
-    const link = linkResult.rows[0];
+    const pool = tryGetPool();
     const totalPrice = body.totalPrice || 2990 * seatsCount;
     const orderCode = `LNK-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
     const ticketsJson = body.tickets ? JSON.stringify(body.tickets) : null;
-    const orderResult = await pool.query(
-      `INSERT INTO orders (event_id, event_template_id, link_code, customer_name, customer_phone, customer_email,
-        seats_count, total_price, order_code, status, payment_status, tickets_json, event_date, event_time, city_id)
-       VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, 'pending', 'pending', $9, $10, $11, $12) RETURNING id`,
-      [link.template_id, body.linkCode, body.customerName.trim(), body.customerPhone.trim(),
-       body.customerEmail?.trim() || null, seatsCount, totalPrice, orderCode, ticketsJson,
-       link.event_date || null, link.event_time || null, link.city_id || null]);
 
+    if (pool) {
+      const linkResult = await pool.query(`
+        SELECT gl.*, et.name as event_name, et.id as template_id, c.name as city_name
+        FROM generated_links gl LEFT JOIN event_templates et ON gl.event_template_id = et.id
+        LEFT JOIN cities c ON gl.city_id = c.id WHERE gl.link_code = $1 AND gl.is_active = true`, [body.linkCode]);
+      if (linkResult.rows.length === 0) return res.status(400).json({ success: false, message: "Ссылка не найдена или неактивна" });
+      const link = linkResult.rows[0];
+      const orderResult = await pool.query(
+        `INSERT INTO orders (event_id, event_template_id, link_code, customer_name, customer_phone, customer_email,
+          seats_count, total_price, order_code, status, payment_status, tickets_json, event_date, event_time, city_id)
+         VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, 'pending', 'pending', $9, $10, $11, $12) RETURNING id`,
+        [link.template_id, body.linkCode, body.customerName.trim(), body.customerPhone.trim(),
+         body.customerEmail?.trim() || null, seatsCount, totalPrice, orderCode, ticketsJson,
+         link.event_date || null, link.event_time || null, link.city_id || null]);
+      const notificationData = {
+        orderId: orderResult.rows[0].id, orderCode, eventName: link.event_name || 'Мероприятие',
+        eventDate: link.event_date?.toISOString?.()?.split("T")[0] || body.selectedDate || "",
+        eventTime: link.event_time || body.selectedTime || "", cityName: link.city_name || '',
+        customerName: body.customerName.trim(), customerPhone: body.customerPhone.trim(),
+        customerEmail: body.customerEmail?.trim(), seatsCount, totalPrice, tickets: body.tickets,
+      };
+      Promise.all([sendChannelNotification(notificationData), sendOrderNotificationToAdmin(notificationData)]).catch(() => {});
+      return res.json({ success: true, orderCode, orderId: orderResult.rows[0].id, eventName: link.event_name || 'Мероприятие', cityName: link.city_name || '', message: `Заказ ${orderCode} успешно создан!` });
+    }
+    const memLink = inMemoryLinks.find(l => l.link_code === body.linkCode && l.is_active);
+    if (!memLink) return res.status(400).json({ success: false, message: "Ссылка не найдена или неактивна" });
+    const tmpl = EVENT_TEMPLATES.find(t => t.id === memLink.event_template_id);
+    const newOrder: InMemoryOrder = {
+      id: inMemoryOrderIdCounter++, order_code: orderCode, event_id: null,
+      event_template_id: memLink.event_template_id, link_code: body.linkCode, admin_id: null,
+      customer_name: body.customerName.trim(), customer_phone: body.customerPhone.trim(),
+      customer_email: body.customerEmail?.trim() || null, seats_count: seatsCount, total_price: totalPrice,
+      status: 'pending', payment_status: 'pending', tickets_json: ticketsJson,
+      event_date: memLink.event_date, event_time: memLink.event_time, city_id: memLink.city_id,
+      event_name: tmpl?.name || memLink.event_name, city_name: memLink.city_name, created_at: new Date().toISOString()
+    };
+    inMemoryOrders.push(newOrder);
     const notificationData = {
-      orderId: orderResult.rows[0].id, orderCode, eventName: link.event_name,
-      eventDate: link.event_date?.toISOString?.()?.split("T")[0] || body.selectedDate || "",
-      eventTime: link.event_time || body.selectedTime || "", cityName: link.city_name,
-      customerName: body.customerName.trim(), customerPhone: body.customerPhone.trim(),
+      orderId: newOrder.id, orderCode, eventName: newOrder.event_name,
+      eventDate: memLink.event_date || body.selectedDate || "", eventTime: memLink.event_time || body.selectedTime || "",
+      cityName: memLink.city_name, customerName: body.customerName.trim(), customerPhone: body.customerPhone.trim(),
       customerEmail: body.customerEmail?.trim(), seatsCount, totalPrice, tickets: body.tickets,
     };
     Promise.all([sendChannelNotification(notificationData), sendOrderNotificationToAdmin(notificationData)]).catch(() => {});
-
-    res.json({ success: true, orderCode, orderId: orderResult.rows[0].id, eventName: link.event_name, cityName: link.city_name, message: `Заказ ${orderCode} успешно создан!` });
+    res.json({ success: true, orderCode, orderId: newOrder.id, eventName: newOrder.event_name, cityName: memLink.city_name, message: `Заказ ${orderCode} успешно создан!` });
   } catch (error) {
     console.error("Error creating link order:", error);
     res.status(500).json({ success: false, message: "Ошибка при создании заказа" });
@@ -359,31 +476,54 @@ app.post("/api/create-template-order", async (req, res) => {
     const seatsCount = parseInt(body.seatsCount) || 1;
     const totalPrice = body.totalPrice || 2990 * seatsCount;
 
-    const pool = getPool();
-    const templateResult = await pool.query(
-      `SELECT et.*, cat.name_ru as category_name FROM event_templates et JOIN categories cat ON et.category_id = cat.id WHERE et.id = $1 AND et.is_active = true`, [body.eventTemplateId]);
-    if (templateResult.rows.length === 0) return res.status(400).json({ success: false, message: "Шаблон мероприятия не найден" });
-
-    const template = templateResult.rows[0];
+    const pool = tryGetPool();
     const orderCode = `TPL-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
     const ticketsJson = body.tickets ? JSON.stringify(body.tickets) : null;
-    const orderResult = await pool.query(
-      `INSERT INTO orders (event_id, event_template_id, customer_name, customer_phone, customer_email,
-        seats_count, total_price, order_code, status, payment_status, tickets_json, event_date, event_time, city_id)
-       VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, 'pending', 'pending', $8, $9, $10, $11) RETURNING id`,
-      [body.eventTemplateId, body.customerName.trim(), body.customerPhone.trim(), body.customerEmail?.trim() || null,
-       seatsCount, totalPrice, orderCode, ticketsJson, body.selectedDate || null, body.selectedTime || null, body.cityId || null]);
 
+    if (pool) {
+      const templateResult = await pool.query(
+        `SELECT et.*, cat.name_ru as category_name FROM event_templates et LEFT JOIN categories cat ON et.category_id = cat.id WHERE et.id = $1 AND et.is_active = true`, [body.eventTemplateId]);
+      if (templateResult.rows.length === 0) return res.status(400).json({ success: false, message: "Шаблон мероприятия не найден" });
+      const template = templateResult.rows[0];
+      const orderResult = await pool.query(
+        `INSERT INTO orders (event_id, event_template_id, customer_name, customer_phone, customer_email,
+          seats_count, total_price, order_code, status, payment_status, tickets_json, event_date, event_time, city_id)
+         VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, 'pending', 'pending', $8, $9, $10, $11) RETURNING id`,
+        [body.eventTemplateId, body.customerName.trim(), body.customerPhone.trim(), body.customerEmail?.trim() || null,
+         seatsCount, totalPrice, orderCode, ticketsJson, body.selectedDate || null, body.selectedTime || null, body.cityId || null]);
+      const notificationData = {
+        orderId: orderResult.rows[0].id, orderCode, eventName: template.name,
+        eventDate: body.selectedDate || "", eventTime: body.selectedTime || "",
+        cityName: body.cityName || "Москва", customerName: body.customerName.trim(),
+        customerPhone: body.customerPhone.trim(), customerEmail: body.customerEmail?.trim(),
+        seatsCount, totalPrice, tickets: body.tickets,
+      };
+      Promise.all([sendChannelNotification(notificationData), sendOrderNotificationToAdmin(notificationData)]).catch(() => {});
+      return res.json({ success: true, orderCode, orderId: orderResult.rows[0].id, eventName: template.name, totalPrice });
+    }
+    const tmpl = EVENT_TEMPLATES.find(t => t.id === parseInt(body.eventTemplateId) && t.is_active);
+    if (!tmpl) return res.status(400).json({ success: false, message: "Шаблон мероприятия не найден" });
+    const city = body.cityId ? CITIES.find(c => c.id === parseInt(body.cityId)) : null;
+    const newOrder: InMemoryOrder = {
+      id: inMemoryOrderIdCounter++, order_code: orderCode, event_id: null,
+      event_template_id: tmpl.id, link_code: null, admin_id: null,
+      customer_name: body.customerName.trim(), customer_phone: body.customerPhone.trim(),
+      customer_email: body.customerEmail?.trim() || null, seats_count: seatsCount, total_price: totalPrice,
+      status: 'pending', payment_status: 'pending', tickets_json: ticketsJson,
+      event_date: body.selectedDate || null, event_time: body.selectedTime || null,
+      city_id: body.cityId ? parseInt(body.cityId) : null,
+      event_name: tmpl.name, city_name: city?.name || body.cityName || 'Москва', created_at: new Date().toISOString()
+    };
+    inMemoryOrders.push(newOrder);
     const notificationData = {
-      orderId: orderResult.rows[0].id, orderCode, eventName: template.name,
+      orderId: newOrder.id, orderCode, eventName: tmpl.name,
       eventDate: body.selectedDate || "", eventTime: body.selectedTime || "",
-      cityName: body.cityName || "Москва", customerName: body.customerName.trim(),
+      cityName: newOrder.city_name, customerName: body.customerName.trim(),
       customerPhone: body.customerPhone.trim(), customerEmail: body.customerEmail?.trim(),
       seatsCount, totalPrice, tickets: body.tickets,
     };
     Promise.all([sendChannelNotification(notificationData), sendOrderNotificationToAdmin(notificationData)]).catch(() => {});
-
-    res.json({ success: true, orderCode, orderId: orderResult.rows[0].id, eventName: template.name, totalPrice });
+    res.json({ success: true, orderCode, orderId: newOrder.id, eventName: tmpl.name, totalPrice });
   } catch (error) {
     console.error("Error creating template order:", error);
     res.status(500).json({ success: false, message: "Ошибка при создании заказа" });
@@ -406,18 +546,28 @@ app.post("/webhooks/telegram/action", async (req, res) => {
         const parts = data.split("_");
         const refundAction = parts[1];
         const refundCode = parts[2];
-        const pool = getPool();
+        const pool = tryGetPool();
 
         try {
-          const refundResult = await pool.query("SELECT * FROM refund_links WHERE refund_code = $1", [refundCode]);
-          if (refundResult.rows.length === 0) { await answerCallbackQuery(callbackQuery.id, "❌ Ссылка не найдена"); return res.send("OK"); }
-          const refund = refundResult.rows[0];
+          let refund: any = null;
+          if (pool) {
+            const refundResult = await pool.query("SELECT * FROM refund_links WHERE refund_code = $1", [refundCode]);
+            if (refundResult.rows.length > 0) refund = refundResult.rows[0];
+          } else {
+            refund = inMemoryRefunds.find(r => r.refund_code === refundCode);
+          }
+          if (!refund) { await answerCallbackQuery(callbackQuery.id, "❌ Ссылка не найдена"); return res.send("OK"); }
           if (refund.status === "approved" || refund.status === "rejected") {
             await answerCallbackQuery(callbackQuery.id, `ℹ️ Уже обработано: ${refund.status === 'approved' ? 'одобрен' : 'отклонён'}`);
             return res.send("OK");
           }
           const newStatus = refundAction === "approve" ? "approved" : "rejected";
-          await pool.query("UPDATE refund_links SET status = $1, processed_at = CURRENT_TIMESTAMP WHERE refund_code = $2", [newStatus, refundCode]);
+          if (pool) {
+            await pool.query("UPDATE refund_links SET status = $1, processed_at = CURRENT_TIMESTAMP WHERE refund_code = $2", [newStatus, refundCode]);
+          } else {
+            const memRef = inMemoryRefunds.find(r => r.refund_code === refundCode);
+            if (memRef) { memRef.status = newStatus; memRef.processed_at = new Date().toISOString(); }
+          }
 
           const refundData = { refundCode: refund.refund_code, amount: refund.amount, customerName: refund.customer_name, refundNumber: refund.refund_number };
           if (refundAction === "approve") { await sendRefundApprovedNotification(refundData); await answerCallbackQuery(callbackQuery.id, "✅ Возврат одобрен"); }
@@ -441,45 +591,55 @@ app.post("/webhooks/telegram/action", async (req, res) => {
       const orderId = parseInt(orderIdStr);
       if (isNaN(orderId)) { await answerCallbackQuery(callbackQuery.id, "❌ Ошибка: неверный ID заказа"); return res.send("OK"); }
 
-      const pool = getPool();
-      let whereClause = "o.id = $1";
+      const pool = tryGetPool();
+      let row: any = null;
 
-      let orderResult = await pool.query(
-        `SELECT o.*, e.name as event_name, e.date::text as event_date, e.time::text as event_time,
-                c.name_ru as category_name, ci.name as city_name
-         FROM orders o JOIN events e ON o.event_id = e.id JOIN categories c ON e.category_id = c.id
-         JOIN cities ci ON e.city_id = ci.id WHERE ${whereClause}`, [orderId]);
-
-      if (orderResult.rows.length === 0) {
-        orderResult = await pool.query(
-          `SELECT o.*, et.name as event_name, gl.event_date::text as event_date, gl.event_time::text as event_time,
-                  cat.name_ru as category_name, ci.name as city_name
-           FROM orders o JOIN event_templates et ON o.event_template_id = et.id
-           JOIN categories cat ON et.category_id = cat.id
-           LEFT JOIN generated_links gl ON gl.link_code = o.link_code
-           LEFT JOIN cities ci ON COALESCE(o.city_id, gl.city_id) = ci.id WHERE ${whereClause}`, [orderId]);
+      if (pool) {
+        let orderResult = await pool.query(
+          `SELECT o.*, e.name as event_name, e.date::text as event_date, e.time::text as event_time,
+                  c.name_ru as category_name, ci.name as city_name
+           FROM orders o LEFT JOIN events e ON o.event_id = e.id LEFT JOIN categories c ON e.category_id = c.id
+           LEFT JOIN cities ci ON e.city_id = ci.id WHERE o.id = $1`, [orderId]);
+        if (orderResult.rows.length === 0) {
+          orderResult = await pool.query(
+            `SELECT o.*, et.name as event_name, gl.event_date::text as event_date, gl.event_time::text as event_time,
+                    cat.name_ru as category_name, ci.name as city_name
+             FROM orders o LEFT JOIN event_templates et ON o.event_template_id = et.id
+             LEFT JOIN categories cat ON et.category_id = cat.id
+             LEFT JOIN generated_links gl ON gl.link_code = o.link_code
+             LEFT JOIN cities ci ON COALESCE(o.city_id, gl.city_id) = ci.id WHERE o.id = $1`, [orderId]);
+        }
+        if (orderResult.rows.length > 0) row = orderResult.rows[0];
+      } else {
+        const memOrder = inMemoryOrders.find(o => o.id === orderId);
+        if (memOrder) row = { id: memOrder.id, order_code: memOrder.order_code, event_name: memOrder.event_name, event_date: memOrder.event_date, event_time: memOrder.event_time, category_name: '', city_name: memOrder.city_name, customer_name: memOrder.customer_name, customer_phone: memOrder.customer_phone, seats_count: memOrder.seats_count, total_price: memOrder.total_price, status: memOrder.status, payment_status: memOrder.payment_status, tickets_json: memOrder.tickets_json, event_id: memOrder.event_id };
       }
 
-      if (orderResult.rows.length === 0) { await answerCallbackQuery(callbackQuery.id, "❌ Заказ не найден"); return res.send("OK"); }
+      if (!row) { await answerCallbackQuery(callbackQuery.id, "❌ Заказ не найден"); return res.send("OK"); }
 
-      const row = orderResult.rows[0];
       let ticketsData: Record<string, number> | undefined;
       if (row.tickets_json) { try { ticketsData = JSON.parse(row.tickets_json); } catch {} }
 
       const order = {
-        id: row.id, orderCode: row.order_code, eventName: row.event_name,
-        categoryName: row.category_name, cityName: row.city_name,
+        id: row.id, orderCode: row.order_code, eventName: row.event_name || 'Мероприятие',
+        categoryName: row.category_name || '', cityName: row.city_name || '',
         eventDate: row.event_date, eventTime: row.event_time,
         customerName: row.customer_name, customerPhone: row.customer_phone,
-        seatsCount: row.seats_count, totalPrice: parseFloat(row.total_price),
+        seatsCount: row.seats_count, totalPrice: parseFloat(row.total_price) || 0,
         status: row.status, paymentStatus: row.payment_status, tickets: ticketsData,
       };
 
       if (action === "confirm") {
-        await pool.query("UPDATE orders SET payment_status = 'confirmed', status = 'confirmed', updated_at = NOW() WHERE id = $1", [orderId]);
+        if (pool) await pool.query("UPDATE orders SET payment_status = 'confirmed', status = 'confirmed', updated_at = NOW() WHERE id = $1", [orderId]);
+        else { const mo = inMemoryOrders.find(o => o.id === orderId); if (mo) { mo.payment_status = 'confirmed'; mo.status = 'confirmed'; } }
       } else if (action === "reject") {
-        await pool.query("UPDATE orders SET payment_status = 'rejected', status = 'rejected', updated_at = NOW() WHERE id = $1", [orderId]);
-        if (row.event_id) await pool.query("UPDATE events SET available_seats = available_seats + $1 WHERE id = $2", [row.seats_count, row.event_id]);
+        if (pool) {
+          await pool.query("UPDATE orders SET payment_status = 'rejected', status = 'rejected', updated_at = NOW() WHERE id = $1", [orderId]);
+          if (row.event_id) await pool.query("UPDATE events SET available_seats = available_seats + $1 WHERE id = $2", [row.seats_count, row.event_id]);
+        } else {
+          const mo = inMemoryOrders.find(o => o.id === orderId); if (mo) { mo.payment_status = 'rejected'; mo.status = 'rejected'; }
+          if (row.event_id) { const me = inMemoryEvents.find(e => e.id === row.event_id); if (me) me.available_seats += row.seats_count; }
+        }
       } else { await answerCallbackQuery(callbackQuery.id, "❌ Неизвестное действие"); return res.send("OK"); }
 
       const status = action === "confirm" ? "confirmed" : "rejected";
@@ -511,37 +671,62 @@ app.get("/api/event/:id", async (req, res) => {
   const eventId = parseInt(req.params.id);
   if (isNaN(eventId)) return res.status(400).json({ error: "Invalid event ID" });
   try {
-    const pool = getPool();
-    const result = await pool.query(
-      `SELECT e.*, c.name_ru as category_name, ci.name as city_name FROM events e
-       JOIN categories c ON e.category_id = c.id JOIN cities ci ON e.city_id = ci.id WHERE e.id = $1`, [eventId]);
-    if (result.rows.length === 0) return res.status(404).json({ error: "Event not found" });
-    const event = result.rows[0];
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query(
+        `SELECT e.*, c.name_ru as category_name, ci.name as city_name FROM events e
+         LEFT JOIN categories c ON e.category_id = c.id LEFT JOIN cities ci ON e.city_id = ci.id WHERE e.id = $1`, [eventId]);
+      if (result.rows.length === 0) return res.status(404).json({ error: "Event not found" });
+      const event = result.rows[0];
+      return res.json({
+        id: event.id, name: event.name, description: event.description,
+        categoryName: event.category_name || '', cityName: event.city_name || '',
+        date: event.date?.toISOString?.()?.split("T")[0] || event.date,
+        time: event.time, price: parseFloat(event.price) || 0,
+        availableSeats: event.available_seats, coverImageUrl: event.cover_image_url, slug: event.slug,
+      });
+    }
+    const memEvent = inMemoryEvents.find(e => e.id === eventId);
+    if (!memEvent) return res.status(404).json({ error: "Event not found" });
+    const cat = CATEGORIES.find(c => c.id === memEvent.category_id);
+    const city = CITIES.find(c => c.id === memEvent.city_id);
     res.json({
-      id: event.id, name: event.name, description: event.description,
-      categoryName: event.category_name, cityName: event.city_name,
-      date: event.date?.toISOString?.()?.split("T")[0] || event.date,
-      time: event.time, price: parseFloat(event.price) || 0,
-      availableSeats: event.available_seats, coverImageUrl: event.cover_image_url, slug: event.slug,
+      id: memEvent.id, name: memEvent.name, description: memEvent.description,
+      categoryName: cat?.name_ru || '', cityName: city?.name || '',
+      date: memEvent.date, time: memEvent.time, price: memEvent.price,
+      availableSeats: memEvent.available_seats, coverImageUrl: memEvent.cover_image_url, slug: memEvent.slug,
     });
   } catch (error) { res.status(500).json({ error: "Failed to fetch event" }); }
 });
 
 app.get("/api/e/:slug", async (req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.query(
-      `SELECT e.*, c.name as city_name, cat.name_ru as category_name FROM events e
-       LEFT JOIN cities c ON e.city_id = c.id LEFT JOIN categories cat ON e.category_id = cat.id
-       WHERE e.slug = $1 AND e.is_published = true`, [req.params.slug]);
-    if (result.rows.length === 0) return res.status(404).json({ error: "Event not found" });
-    const e = result.rows[0];
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query(
+        `SELECT e.*, c.name as city_name, cat.name_ru as category_name FROM events e
+         LEFT JOIN cities c ON e.city_id = c.id LEFT JOIN categories cat ON e.category_id = cat.id
+         WHERE e.slug = $1 AND e.is_published = true`, [req.params.slug]);
+      if (result.rows.length > 0) {
+        const e = result.rows[0];
+        return res.json({
+          id: e.id, adminId: e.admin_id, name: e.name, description: e.description,
+          categoryName: e.category_name || '', cityName: e.city_name || '',
+          date: e.date?.toISOString?.()?.split("T")[0] || e.date,
+          time: e.time, price: parseFloat(e.price) || 0,
+          availableSeats: e.available_seats, coverImageUrl: e.cover_image_url, slug: e.slug,
+        });
+      }
+    }
+    const memEvent = inMemoryEvents.find(e => e.slug === req.params.slug && e.is_published);
+    if (!memEvent) return res.status(404).json({ error: "Event not found" });
+    const cat = CATEGORIES.find(c => c.id === memEvent.category_id);
+    const city = CITIES.find(c => c.id === memEvent.city_id);
     res.json({
-      id: e.id, adminId: e.admin_id, name: e.name, description: e.description,
-      categoryName: e.category_name, cityName: e.city_name,
-      date: e.date?.toISOString?.()?.split("T")[0] || e.date,
-      time: e.time, price: parseFloat(e.price) || 0,
-      availableSeats: e.available_seats, coverImageUrl: e.cover_image_url, slug: e.slug,
+      id: memEvent.id, adminId: memEvent.admin_id, name: memEvent.name, description: memEvent.description,
+      categoryName: cat?.name_ru || '', cityName: city?.name || '',
+      date: memEvent.date, time: memEvent.time, price: memEvent.price,
+      availableSeats: memEvent.available_seats, coverImageUrl: memEvent.cover_image_url, slug: memEvent.slug,
     });
   } catch { res.status(500).json({ error: "Failed to fetch event" }); }
 });
@@ -549,12 +734,18 @@ app.get("/api/e/:slug", async (req, res) => {
 // ==================== ORDER API ====================
 app.get("/api/order/:code", async (req, res) => {
   try {
-    const pool = getPool();
-    let result = await pool.query(`SELECT o.*, e.name as event_name, e.price FROM orders o JOIN events e ON o.event_id = e.id WHERE o.order_code = $1`, [req.params.code]);
-    if (result.rows.length === 0) result = await pool.query(`SELECT o.*, et.name as event_name, 2990 as price FROM orders o JOIN event_templates et ON o.event_template_id = et.id WHERE o.order_code = $1`, [req.params.code]);
-    if (result.rows.length === 0) return res.status(404).json({ error: "Order not found" });
-    const order = result.rows[0];
-    res.json({ id: order.id, orderCode: order.order_code, eventName: order.event_name, customerName: order.customer_name, seatsCount: order.seats_count, totalPrice: parseFloat(order.total_price) || order.seats_count * parseFloat(order.price), status: order.status });
+    const pool = tryGetPool();
+    if (pool) {
+      let result = await pool.query(`SELECT o.*, e.name as event_name, e.price FROM orders o LEFT JOIN events e ON o.event_id = e.id WHERE o.order_code = $1`, [req.params.code]);
+      if (result.rows.length === 0) result = await pool.query(`SELECT o.*, et.name as event_name, 2990 as price FROM orders o LEFT JOIN event_templates et ON o.event_template_id = et.id WHERE o.order_code = $1`, [req.params.code]);
+      if (result.rows.length > 0) {
+        const order = result.rows[0];
+        return res.json({ id: order.id, orderCode: order.order_code, eventName: order.event_name || 'Мероприятие', customerName: order.customer_name, seatsCount: order.seats_count, totalPrice: parseFloat(order.total_price) || order.seats_count * parseFloat(order.price || '2990'), status: order.status });
+      }
+    }
+    const memOrder = inMemoryOrders.find(o => o.order_code === req.params.code);
+    if (!memOrder) return res.status(404).json({ error: "Order not found" });
+    res.json({ id: memOrder.id, orderCode: memOrder.order_code, eventName: memOrder.event_name, customerName: memOrder.customer_name, seatsCount: memOrder.seats_count, totalPrice: memOrder.total_price, status: memOrder.status });
   } catch { res.status(500).json({ error: "Failed to fetch order" }); }
 });
 
@@ -562,36 +753,53 @@ app.get("/api/order/:code", async (req, res) => {
 app.get("/api/ticket/:orderCode", async (req, res) => {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   try {
-    const pool = getPool();
-    let result = await pool.query(`
-      SELECT o.*, et.name as event_name, et.ticket_image_url, et.image_url,
-             COALESCE(o.event_date, gl.event_date) as event_date, COALESCE(o.event_time, gl.event_time) as event_time,
-             COALESCE(o.city_id, gl.city_id) as city_id, c.name as city_name
-      FROM orders o JOIN event_templates et ON o.event_template_id = et.id
-      LEFT JOIN generated_links gl ON o.link_code = gl.link_code
-      LEFT JOIN cities c ON COALESCE(o.city_id, gl.city_id) = c.id
-      WHERE o.order_code = $1 AND o.event_template_id IS NOT NULL`, [req.params.orderCode]);
-    let eventTemplateId = null;
-    if (result.rows.length === 0) {
-      result = await pool.query(`SELECT o.*, e.name as event_name, e.date as event_date, e.time as event_time, NULL as ticket_image_url, e.image_url as image_url, ci.name as city_name FROM orders o JOIN events e ON o.event_id = e.id LEFT JOIN cities ci ON e.city_id = ci.id WHERE o.order_code = $1`, [req.params.orderCode]);
-    } else { eventTemplateId = result.rows[0].event_template_id; }
-
-    if (result.rows.length === 0) return res.status(404).json({ success: false, message: "Order not found" });
-    const order = result.rows[0];
-    let finalImageUrl = order.ticket_image_url || order.image_url;
-    if (!finalImageUrl && eventTemplateId) {
-      const imgResult = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 1", [eventTemplateId]);
-      if (imgResult.rows.length > 0) finalImageUrl = imgResult.rows[0].image_url;
+    const pool = tryGetPool();
+    if (pool) {
+      let result = await pool.query(`
+        SELECT o.*, et.name as event_name, et.ticket_image_url, et.image_url,
+               COALESCE(o.event_date, gl.event_date) as event_date, COALESCE(o.event_time, gl.event_time) as event_time,
+               COALESCE(o.city_id, gl.city_id) as city_id, c.name as city_name
+        FROM orders o LEFT JOIN event_templates et ON o.event_template_id = et.id
+        LEFT JOIN generated_links gl ON o.link_code = gl.link_code
+        LEFT JOIN cities c ON COALESCE(o.city_id, gl.city_id) = c.id
+        WHERE o.order_code = $1 AND o.event_template_id IS NOT NULL`, [req.params.orderCode]);
+      let eventTemplateId = null;
+      if (result.rows.length === 0) {
+        result = await pool.query(`SELECT o.*, e.name as event_name, e.date as event_date, e.time as event_time, NULL as ticket_image_url, e.image_url as image_url, ci.name as city_name FROM orders o LEFT JOIN events e ON o.event_id = e.id LEFT JOIN cities ci ON e.city_id = ci.id WHERE o.order_code = $1`, [req.params.orderCode]);
+      } else { eventTemplateId = result.rows[0].event_template_id; }
+      if (result.rows.length > 0) {
+        const order = result.rows[0];
+        let finalImageUrl = order.ticket_image_url || order.image_url;
+        if (!finalImageUrl && eventTemplateId) {
+          const imgResult = await pool.query("SELECT image_url FROM event_template_images WHERE event_template_id = $1 ORDER BY sort_order LIMIT 1", [eventTemplateId]);
+          if (imgResult.rows.length > 0) finalImageUrl = imgResult.rows[0].image_url;
+        }
+        if (order.payment_status !== 'confirmed') return res.json({ success: true, pending: true, message: "Payment pending confirmation" });
+        let ticketsData = null;
+        if (order.tickets_json) { try { ticketsData = JSON.parse(order.tickets_json); } catch {} }
+        return res.json({
+          success: true, ticket: {
+            order_code: order.order_code, orderId: order.id, event_name: order.event_name || 'Мероприятие',
+            event_date: order.event_date, event_time: order.event_time, city_name: order.city_name || 'Москва',
+            customer_name: order.customer_name, total_price: order.total_price,
+            ticket_image_url: order.ticket_image_url, image_url: finalImageUrl, tickets: ticketsData,
+          }
+        });
+      }
     }
-    if (order.payment_status !== 'confirmed') return res.json({ success: true, pending: true, message: "Payment pending confirmation" });
+    const memOrder = inMemoryOrders.find(o => o.order_code === req.params.orderCode);
+    if (!memOrder) return res.status(404).json({ success: false, message: "Order not found" });
+    if (memOrder.payment_status !== 'confirmed') return res.json({ success: true, pending: true, message: "Payment pending confirmation" });
+    const tmpl = memOrder.event_template_id ? EVENT_TEMPLATES.find(t => t.id === memOrder.event_template_id) : null;
+    const img = memOrder.event_template_id ? (EVENT_TEMPLATE_IMAGES[memOrder.event_template_id] || null) : null;
     let ticketsData = null;
-    if (order.tickets_json) { try { ticketsData = JSON.parse(order.tickets_json); } catch {} }
+    if (memOrder.tickets_json) { try { ticketsData = JSON.parse(memOrder.tickets_json); } catch {} }
     res.json({
       success: true, ticket: {
-        order_code: order.order_code, orderId: order.id, event_name: order.event_name || 'Мероприятие',
-        event_date: order.event_date, event_time: order.event_time, city_name: order.city_name || 'Москва',
-        customer_name: order.customer_name, total_price: order.total_price,
-        ticket_image_url: order.ticket_image_url, image_url: finalImageUrl, tickets: ticketsData,
+        order_code: memOrder.order_code, orderId: memOrder.id, event_name: memOrder.event_name,
+        event_date: memOrder.event_date, event_time: memOrder.event_time, city_name: memOrder.city_name || 'Москва',
+        customer_name: memOrder.customer_name, total_price: memOrder.total_price,
+        ticket_image_url: tmpl?.ticket_image_url || null, image_url: img, tickets: ticketsData,
       }
     });
   } catch (error) { console.error("Error fetching ticket:", error); res.status(500).json({ success: false, message: "Error fetching ticket" }); }
@@ -600,30 +808,40 @@ app.get("/api/ticket/:orderCode", async (req, res) => {
 // ==================== TICKET ORDER API ====================
 app.get("/api/ticket-order/:code", async (req, res) => {
   try {
-    const pool = getPool();
-    let result = await pool.query(`SELECT o.*, e.name as event_name, e.date, e.time, e.price FROM orders o JOIN events e ON o.event_id = e.id WHERE o.order_code = $1`, [req.params.code]);
-    if (result.rows.length === 0) {
-      result = await pool.query(`SELECT o.*, et.name as event_name, COALESCE(o.event_date, gl.event_date) as date, COALESCE(o.event_time, gl.event_time) as time, c.name as city_name, 2990 as price FROM orders o JOIN event_templates et ON o.event_template_id = et.id LEFT JOIN generated_links gl ON gl.link_code = o.link_code LEFT JOIN cities c ON COALESCE(o.city_id, gl.city_id) = c.id WHERE o.order_code = $1`, [req.params.code]);
+    const pool = tryGetPool();
+    if (pool) {
+      let result = await pool.query(`SELECT o.*, e.name as event_name, e.date, e.time, e.price FROM orders o LEFT JOIN events e ON o.event_id = e.id WHERE o.order_code = $1`, [req.params.code]);
+      if (result.rows.length === 0) {
+        result = await pool.query(`SELECT o.*, et.name as event_name, COALESCE(o.event_date, gl.event_date) as date, COALESCE(o.event_time, gl.event_time) as time, c.name as city_name, 2990 as price FROM orders o LEFT JOIN event_templates et ON o.event_template_id = et.id LEFT JOIN generated_links gl ON gl.link_code = o.link_code LEFT JOIN cities c ON COALESCE(o.city_id, gl.city_id) = c.id WHERE o.order_code = $1`, [req.params.code]);
+      }
+      if (result.rows.length > 0) {
+        const o = result.rows[0];
+        return res.json({ id: o.id, orderCode: o.order_code, eventName: o.event_name || 'Мероприятие', customerName: o.customer_name, seatsCount: o.seats_count, totalPrice: parseFloat(o.total_price), status: o.status, eventDate: o.date, eventTime: o.time });
+      }
     }
-    if (result.rows.length === 0) return res.status(404).json({ error: "Order not found" });
-    const o = result.rows[0];
-    res.json({ id: o.id, orderCode: o.order_code, eventName: o.event_name, customerName: o.customer_name, seatsCount: o.seats_count, totalPrice: parseFloat(o.total_price), status: o.status, eventDate: o.date, eventTime: o.time });
+    const memOrder = inMemoryOrders.find(o => o.order_code === req.params.code);
+    if (!memOrder) return res.status(404).json({ error: "Order not found" });
+    res.json({ id: memOrder.id, orderCode: memOrder.order_code, eventName: memOrder.event_name, customerName: memOrder.customer_name, seatsCount: memOrder.seats_count, totalPrice: memOrder.total_price, status: memOrder.status, eventDate: memOrder.event_date, eventTime: memOrder.event_time });
   } catch { res.status(500).json({ error: "Failed to fetch order" }); }
 });
 
 app.get("/api/ticket-order/:code/payment-settings", async (req, res) => {
   try {
-    const pool = getPool();
-    const orderCheck = await pool.query("SELECT event_template_id FROM orders WHERE order_code = $1", [req.params.code]);
-    let result;
-    if (orderCheck.rows.length > 0 && orderCheck.rows[0].event_template_id) {
-      result = await pool.query("SELECT * FROM payment_settings ORDER BY id DESC LIMIT 1");
-    } else {
-      result = await pool.query(`SELECT aps.* FROM admin_payment_settings aps JOIN orders o ON o.admin_id = aps.admin_id WHERE o.order_code = $1`, [req.params.code]);
+    const pool = tryGetPool();
+    if (pool) {
+      const orderCheck = await pool.query("SELECT event_template_id FROM orders WHERE order_code = $1", [req.params.code]);
+      let result;
+      if (orderCheck.rows.length > 0 && orderCheck.rows[0].event_template_id) {
+        result = await pool.query("SELECT * FROM payment_settings ORDER BY id DESC LIMIT 1");
+      } else {
+        result = await pool.query(`SELECT aps.* FROM admin_payment_settings aps JOIN orders o ON o.admin_id = aps.admin_id WHERE o.order_code = $1`, [req.params.code]);
+      }
+      if (result.rows.length > 0) {
+        const row = result.rows[0];
+        return res.json({ cardNumber: row.card_number, cardHolderName: row.card_holder_name, bankName: row.bank_name });
+      }
     }
-    if (result.rows.length === 0) return res.json({ cardNumber: "", cardHolderName: "", bankName: "" });
-    const row = result.rows[0];
-    res.json({ cardNumber: row.card_number, cardHolderName: row.card_holder_name, bankName: row.bank_name });
+    res.json({ cardNumber: inMemoryPaymentSettings.cardNumber, cardHolderName: inMemoryPaymentSettings.cardHolderName, bankName: inMemoryPaymentSettings.bankName });
   } catch { res.json({ cardNumber: "", cardHolderName: "", bankName: "" }); }
 });
 
@@ -631,26 +849,37 @@ app.post("/api/ticket-order/:code/mark-paid", async (req, res) => {
   try {
     const orderCode = req.params.code;
     const screenshot = req.body.screenshot || null;
-    const pool = getPool();
+    const pool = tryGetPool();
+    let order: any = null;
 
-    let orderResult = await pool.query(`SELECT o.*, e.name as event_name, e.date as event_date, e.time as event_time, ci.name as city_name FROM orders o JOIN events e ON o.event_id = e.id JOIN cities ci ON e.city_id = ci.id WHERE o.order_code = $1`, [orderCode]);
-    if (orderResult.rows.length === 0) {
-      orderResult = await pool.query(`SELECT o.*, et.name as event_name, COALESCE(o.event_date, gl.event_date) as event_date, COALESCE(o.event_time, gl.event_time) as event_time, c.name as city_name FROM orders o JOIN event_templates et ON o.event_template_id = et.id LEFT JOIN generated_links gl ON gl.link_code = o.link_code LEFT JOIN cities c ON COALESCE(o.city_id, gl.city_id) = c.id WHERE o.order_code = $1`, [orderCode]);
+    if (pool) {
+      let orderResult = await pool.query(`SELECT o.*, e.name as event_name, e.date as event_date, e.time as event_time, ci.name as city_name FROM orders o LEFT JOIN events e ON o.event_id = e.id LEFT JOIN cities ci ON e.city_id = ci.id WHERE o.order_code = $1`, [orderCode]);
+      if (orderResult.rows.length === 0) {
+        orderResult = await pool.query(`SELECT o.*, et.name as event_name, COALESCE(o.event_date, gl.event_date) as event_date, COALESCE(o.event_time, gl.event_time) as event_time, c.name as city_name FROM orders o LEFT JOIN event_templates et ON o.event_template_id = et.id LEFT JOIN generated_links gl ON gl.link_code = o.link_code LEFT JOIN cities c ON COALESCE(o.city_id, gl.city_id) = c.id WHERE o.order_code = $1`, [orderCode]);
+      }
+      if (orderResult.rows.length > 0) {
+        order = orderResult.rows[0];
+        await pool.query("UPDATE orders SET status='waiting_confirmation' WHERE order_code=$1", [orderCode]);
+      }
+    } else {
+      const memOrder = inMemoryOrders.find(o => o.order_code === orderCode);
+      if (memOrder) {
+        memOrder.status = 'waiting_confirmation';
+        order = { id: memOrder.id, order_code: memOrder.order_code, event_name: memOrder.event_name, event_date: memOrder.event_date, event_time: memOrder.event_time, city_name: memOrder.city_name, customer_name: memOrder.customer_name, customer_phone: memOrder.customer_phone, customer_email: memOrder.customer_email, seats_count: memOrder.seats_count, total_price: memOrder.total_price, tickets_json: memOrder.tickets_json };
+      }
     }
-    if (orderResult.rows.length === 0) return res.status(404).json({ success: false, message: "Заказ не найден" });
-    const order = orderResult.rows[0];
-    await pool.query("UPDATE orders SET status='waiting_confirmation' WHERE order_code=$1", [orderCode]);
+    if (!order) return res.status(404).json({ success: false, message: "Заказ не найден" });
 
     let tickets: Record<string, number> | undefined;
     if (order.tickets_json) { try { tickets = JSON.parse(order.tickets_json); } catch {} }
 
     const notificationData = {
-      orderId: order.id, orderCode: order.order_code, eventName: order.event_name,
-      eventDate: order.event_date?.toISOString?.()?.split("T")[0] || String(order.event_date),
+      orderId: order.id, orderCode: order.order_code, eventName: order.event_name || 'Мероприятие',
+      eventDate: order.event_date?.toISOString?.()?.split("T")[0] || String(order.event_date || ''),
       eventTime: order.event_time || "00:00", cityName: order.city_name || "Москва",
       customerName: order.customer_name, customerPhone: order.customer_phone,
       customerEmail: order.customer_email, seatsCount: order.seats_count,
-      totalPrice: parseFloat(order.total_price), tickets,
+      totalPrice: parseFloat(order.total_price) || 0, tickets,
     };
     try {
       await sendChannelPaymentPending(notificationData);
@@ -664,23 +893,48 @@ app.post("/api/ticket-order/:code/mark-paid", async (req, res) => {
 app.post("/api/create-ticket-order", async (req, res) => {
   try {
     const body = req.body;
-    const pool = getPool();
-    const eventResult = await pool.query(`SELECT e.id, e.price, e.available_seats, e.admin_id, e.name, e.date, e.time, c.name as city_name FROM events e LEFT JOIN cities c ON e.city_id = c.id WHERE e.slug=$1`, [body.eventSlug]);
-    if (eventResult.rows.length === 0) return res.json({ success: false, message: "Мероприятие не найдено" });
-    const event = eventResult.rows[0];
-    if (event.available_seats < body.seatsCount) return res.json({ success: false, message: "Недостаточно мест" });
-
+    const pool = tryGetPool();
+    if (pool) {
+      const eventResult = await pool.query(`SELECT e.id, e.price, e.available_seats, e.admin_id, e.name, e.date, e.time, c.name as city_name FROM events e LEFT JOIN cities c ON e.city_id = c.id WHERE e.slug=$1`, [body.eventSlug]);
+      if (eventResult.rows.length === 0) return res.json({ success: false, message: "Мероприятие не найдено" });
+      const event = eventResult.rows[0];
+      if (event.available_seats < body.seatsCount) return res.json({ success: false, message: "Недостаточно мест" });
+      const orderCode = `TK${Date.now().toString(36).toUpperCase()}`;
+      const totalPrice = parseFloat(event.price) * body.seatsCount;
+      const orderResult = await pool.query(
+        `INSERT INTO orders (event_id, admin_id, customer_name, customer_phone, customer_email, seats_count, total_price, order_code, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending') RETURNING id`,
+        [event.id, event.admin_id, body.customerName, body.customerPhone, body.customerEmail, body.seatsCount, totalPrice, orderCode]);
+      await pool.query("UPDATE events SET available_seats = available_seats - $1 WHERE id = $2", [body.seatsCount, event.id]);
+      const notificationData = {
+        orderId: orderResult.rows[0].id, orderCode, eventName: event.name,
+        eventDate: event.date?.toISOString?.()?.split("T")[0] || String(event.date),
+        eventTime: event.time || "", cityName: event.city_name || "",
+        customerName: body.customerName, customerPhone: body.customerPhone,
+        customerEmail: body.customerEmail, seatsCount: body.seatsCount, totalPrice,
+      };
+      Promise.all([sendChannelNotification(notificationData), sendOrderNotificationToAdmin(notificationData)]).catch(() => {});
+      return res.json({ success: true, orderCode });
+    }
+    const memEvent = inMemoryEvents.find(e => e.slug === body.eventSlug);
+    if (!memEvent) return res.json({ success: false, message: "Мероприятие не найдено" });
+    if (memEvent.available_seats < body.seatsCount) return res.json({ success: false, message: "Недостаточно мест" });
     const orderCode = `TK${Date.now().toString(36).toUpperCase()}`;
-    const totalPrice = parseFloat(event.price) * body.seatsCount;
-    const orderResult = await pool.query(
-      `INSERT INTO orders (event_id, admin_id, customer_name, customer_phone, customer_email, seats_count, total_price, order_code, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending') RETURNING id`,
-      [event.id, event.admin_id, body.customerName, body.customerPhone, body.customerEmail, body.seatsCount, totalPrice, orderCode]);
-    await pool.query("UPDATE events SET available_seats = available_seats - $1 WHERE id = $2", [body.seatsCount, event.id]);
-
+    const totalPrice = memEvent.price * body.seatsCount;
+    const city = CITIES.find(c => c.id === memEvent.city_id);
+    const newOrder: InMemoryOrder = {
+      id: inMemoryOrderIdCounter++, order_code: orderCode, event_id: memEvent.id,
+      event_template_id: null, link_code: null, admin_id: memEvent.admin_id,
+      customer_name: body.customerName, customer_phone: body.customerPhone,
+      customer_email: body.customerEmail || null, seats_count: body.seatsCount, total_price: totalPrice,
+      status: 'pending', payment_status: 'pending', tickets_json: null,
+      event_date: memEvent.date, event_time: memEvent.time, city_id: memEvent.city_id,
+      event_name: memEvent.name, city_name: city?.name || '', created_at: new Date().toISOString()
+    };
+    inMemoryOrders.push(newOrder);
+    memEvent.available_seats -= body.seatsCount;
     const notificationData = {
-      orderId: orderResult.rows[0].id, orderCode, eventName: event.name,
-      eventDate: event.date?.toISOString?.()?.split("T")[0] || String(event.date),
-      eventTime: event.time || "", cityName: event.city_name || "",
+      orderId: newOrder.id, orderCode, eventName: memEvent.name,
+      eventDate: memEvent.date, eventTime: memEvent.time, cityName: city?.name || "",
       customerName: body.customerName, customerPhone: body.customerPhone,
       customerEmail: body.customerEmail, seatsCount: body.seatsCount, totalPrice,
     };
@@ -708,12 +962,16 @@ app.post("/api/admin/site-settings", async (req, res) => {
   if (!checkAdmin(req, res)) return;
   try {
     const body = req.body;
-    const pool = getPool();
-    const check = await pool.query("SELECT id FROM site_settings LIMIT 1");
-    if (check.rows.length === 0) {
-      await pool.query("INSERT INTO site_settings (support_contact, support_label, chat_script) VALUES ($1, $2, $3)", [body.supportContact || "https://t.me/support", body.supportLabel || "Тех. поддержка", body.chatScript || ""]);
+    const pool = tryGetPool();
+    if (pool) {
+      const check = await pool.query("SELECT id FROM site_settings LIMIT 1");
+      if (check.rows.length === 0) {
+        await pool.query("INSERT INTO site_settings (support_contact, support_label, chat_script) VALUES ($1, $2, $3)", [body.supportContact || "https://t.me/support", body.supportLabel || "Тех. поддержка", body.chatScript || ""]);
+      } else {
+        await pool.query("UPDATE site_settings SET support_contact=$1, support_label=$2, chat_script=$3, updated_at=CURRENT_TIMESTAMP WHERE id=$4", [body.supportContact, body.supportLabel, body.chatScript, check.rows[0].id]);
+      }
     } else {
-      await pool.query("UPDATE site_settings SET support_contact=$1, support_label=$2, chat_script=$3, updated_at=CURRENT_TIMESTAMP WHERE id=$4", [body.supportContact, body.supportLabel, body.chatScript, check.rows[0].id]);
+      inMemorySiteSettings = { supportContact: body.supportContact || "https://t.me/support", supportLabel: body.supportLabel || "Тех. поддержка", chatScript: body.chatScript || "" };
     }
     res.json({ success: true });
   } catch { res.status(500).json({ success: false, message: "Ошибка сохранения" }); }
@@ -742,9 +1000,12 @@ app.post("/api/admin/chat-script", async (req, res) => {
   try {
     const adminPassword = process.env.ADMIN_PASSWORD;
     if (!adminPassword || req.body.password !== adminPassword) return res.status(401).json({ success: false, message: "Неверный пароль" });
-    const pool = getPool();
-    const result = await pool.query("SELECT chat_script FROM site_settings ORDER BY id DESC LIMIT 1");
-    res.json({ success: true, chatScript: result.rows.length > 0 ? result.rows[0].chat_script : "" });
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query("SELECT chat_script FROM site_settings ORDER BY id DESC LIMIT 1");
+      return res.json({ success: true, chatScript: result.rows.length > 0 ? result.rows[0].chat_script : "" });
+    }
+    res.json({ success: true, chatScript: inMemorySiteSettings.chatScript });
   } catch { res.status(500).json({ success: false, message: "Ошибка" }); }
 });
 
@@ -767,8 +1028,12 @@ app.post("/api/admin/payment-settings", async (req, res) => {
   if (!checkAdmin(req, res)) return;
   try {
     const body = req.body;
-    const pool = getPool();
-    await pool.query("UPDATE payment_settings SET card_number=$1, card_holder_name=$2, bank_name=$3, sbp_enabled=$4, updated_at=CURRENT_TIMESTAMP WHERE id=1", [body.cardNumber, body.cardHolderName, body.bankName, body.sbpEnabled !== false]);
+    const pool = tryGetPool();
+    if (pool) {
+      await pool.query("UPDATE payment_settings SET card_number=$1, card_holder_name=$2, bank_name=$3, sbp_enabled=$4, updated_at=CURRENT_TIMESTAMP WHERE id=1", [body.cardNumber, body.cardHolderName, body.bankName, body.sbpEnabled !== false]);
+    } else {
+      inMemoryPaymentSettings = { cardNumber: body.cardNumber || '', cardHolderName: body.cardHolderName || '', bankName: body.bankName || '', sbpEnabled: body.sbpEnabled !== false };
+    }
     res.json({ success: true });
   } catch { res.status(500).json({ success: false, message: "Ошибка сохранения" }); }
 });
@@ -779,11 +1044,22 @@ app.post("/api/admin/events", async (req, res) => {
   try {
     const body = req.body;
     const slug = body.name.toLowerCase().replace(/[^\w\sа-яё-]/gi, '').replace(/\s+/g, '-').replace(/--+/g, '-');
-    const pool = getPool();
-    const result = await pool.query(
-      `INSERT INTO events (name, description, category_id, city_id, date, time, price, available_seats, cover_image_url, slug, is_published) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true) RETURNING id`,
-      [body.name, body.description, body.categoryId, body.cityId, body.date, body.time, body.price, body.availableSeats, body.coverImageUrl, slug]);
-    res.json({ success: true, eventId: result.rows[0].id, slug });
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query(
+        `INSERT INTO events (name, description, category_id, city_id, date, time, price, available_seats, cover_image_url, slug, is_published) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true) RETURNING id`,
+        [body.name, body.description, body.categoryId, body.cityId, body.date, body.time, body.price, body.availableSeats, body.coverImageUrl, slug]);
+      return res.json({ success: true, eventId: result.rows[0].id, slug });
+    }
+    const newEvent: InMemoryEvent = {
+      id: inMemoryEventIdCounter++, name: body.name, description: body.description || '',
+      category_id: body.categoryId, city_id: body.cityId, date: body.date, time: body.time,
+      price: parseFloat(body.price) || 0, available_seats: parseInt(body.availableSeats) || 100,
+      cover_image_url: body.coverImageUrl || null, slug, is_published: true, admin_id: null,
+      created_at: new Date().toISOString()
+    };
+    inMemoryEvents.push(newEvent);
+    res.json({ success: true, eventId: newEvent.id, slug });
   } catch { res.status(500).json({ success: false, message: "Ошибка создания мероприятия" }); }
 });
 
@@ -792,9 +1068,14 @@ app.put("/api/admin/events/:id", async (req, res) => {
   try {
     const body = req.body;
     const slug = body.name.toLowerCase().replace(/[^\w\sа-яё-]/gi, '').replace(/\s+/g, '-').replace(/--+/g, '-');
-    const pool = getPool();
-    await pool.query("UPDATE events SET name=$1, description=$2, category_id=$3, city_id=$4, date=$5, time=$6, price=$7, available_seats=$8, cover_image_url=$9, slug=$10 WHERE id=$11",
-      [body.name, body.description, body.categoryId, body.cityId, body.date, body.time, body.price, body.availableSeats, body.coverImageUrl, slug, req.params.id]);
+    const pool = tryGetPool();
+    if (pool) {
+      await pool.query("UPDATE events SET name=$1, description=$2, category_id=$3, city_id=$4, date=$5, time=$6, price=$7, available_seats=$8, cover_image_url=$9, slug=$10 WHERE id=$11",
+        [body.name, body.description, body.categoryId, body.cityId, body.date, body.time, body.price, body.availableSeats, body.coverImageUrl, slug, req.params.id]);
+    } else {
+      const memEvent = inMemoryEvents.find(e => e.id === parseInt(req.params.id));
+      if (memEvent) { Object.assign(memEvent, { name: body.name, description: body.description, category_id: body.categoryId, city_id: body.cityId, date: body.date, time: body.time, price: parseFloat(body.price) || 0, available_seats: parseInt(body.availableSeats) || 100, cover_image_url: body.coverImageUrl, slug }); }
+    }
     res.json({ success: true });
   } catch { res.status(500).json({ success: false, message: "Ошибка обновления мероприятия" }); }
 });
@@ -802,8 +1083,13 @@ app.put("/api/admin/events/:id", async (req, res) => {
 app.delete("/api/admin/events/:id", async (req, res) => {
   if (!checkAdmin(req, res)) return;
   try {
-    const pool = getPool();
-    await pool.query("DELETE FROM events WHERE id=$1", [req.params.id]);
+    const pool = tryGetPool();
+    if (pool) {
+      await pool.query("DELETE FROM events WHERE id=$1", [req.params.id]);
+    } else {
+      const idx = inMemoryEvents.findIndex(e => e.id === parseInt(req.params.id));
+      if (idx >= 0) inMemoryEvents.splice(idx, 1);
+    }
     res.json({ success: true });
   } catch { res.status(500).json({ success: false, message: "Ошибка удаления мероприятия" }); }
 });
@@ -813,11 +1099,17 @@ app.post("/api/admin/cities", async (req, res) => {
   if (!checkAdmin(req, res)) return;
   try {
     if (!req.body.name || req.body.name.trim().length < 2) return res.status(400).json({ success: false, message: "Название города должно быть не менее 2 символов" });
+    const cityName = req.body.name.trim();
     const pool = tryGetPool();
-    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
-    const existing = await pool.query("SELECT id FROM cities WHERE name = $1", [req.body.name.trim()]);
-    if (existing.rows.length > 0) return res.status(400).json({ success: false, message: "Город уже существует" });
-    await pool.query("INSERT INTO cities (name) VALUES ($1)", [req.body.name.trim()]);
+    if (pool) {
+      const existing = await pool.query("SELECT id FROM cities WHERE name = $1", [cityName]);
+      if (existing.rows.length > 0) return res.status(400).json({ success: false, message: "Город уже существует" });
+      await pool.query("INSERT INTO cities (name) VALUES ($1)", [cityName]);
+    } else {
+      if (CITIES.find(c => c.name === cityName)) return res.status(400).json({ success: false, message: "Город уже существует" });
+      const maxId = CITIES.reduce((max, c) => Math.max(max, c.id), 0);
+      CITIES.push({ id: maxId + 1, name: cityName });
+    }
     res.json({ success: true });
   } catch (error) { console.error("Error adding city:", error); res.status(500).json({ success: false, message: "Ошибка добавления города" }); }
 });
@@ -825,11 +1117,18 @@ app.post("/api/admin/cities", async (req, res) => {
 app.delete("/api/admin/cities/:id", async (req, res) => {
   if (!checkAdmin(req, res)) return;
   try {
+    const cityId = parseInt(req.params.id);
     const pool = tryGetPool();
-    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
-    await pool.query("DELETE FROM generated_links WHERE city_id = $1", [req.params.id]);
-    await pool.query("DELETE FROM event_template_addresses WHERE city_id = $1", [req.params.id]);
-    await pool.query("DELETE FROM cities WHERE id = $1", [req.params.id]);
+    if (pool) {
+      await pool.query("DELETE FROM generated_links WHERE city_id = $1", [cityId]);
+      await pool.query("DELETE FROM event_template_addresses WHERE city_id = $1", [cityId]);
+      await pool.query("DELETE FROM cities WHERE id = $1", [cityId]);
+    } else {
+      const idx = CITIES.findIndex(c => c.id === cityId);
+      if (idx >= 0) CITIES.splice(idx, 1);
+      const linkIdx = inMemoryLinks.filter(l => l.city_id === cityId);
+      linkIdx.forEach(l => { const i = inMemoryLinks.indexOf(l); if (i >= 0) inMemoryLinks.splice(i, 1); });
+    }
     res.json({ success: true });
   } catch (error) { console.error("Error deleting city:", error); res.status(500).json({ success: false, message: "Ошибка удаления города" }); }
 });
@@ -838,25 +1137,39 @@ app.delete("/api/admin/cities/:id", async (req, res) => {
 app.post("/api/admin/register", async (req, res) => {
   try {
     const { username, displayName, password } = req.body;
-    const pool = getPool();
-    const existing = await pool.query("SELECT id FROM admins WHERE username=$1", [username]);
-    if (existing.rows.length > 0) return res.json({ success: false, message: "Логин уже занят" });
-    const result = await pool.query("INSERT INTO admins (username, password_hash, display_name) VALUES ($1, $2, $3) RETURNING id, username, display_name", [username, password, displayName]);
-    const admin = result.rows[0];
-    const token = `${admin.id}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    res.json({ success: true, token, admin: { id: admin.id, username: admin.username, displayName: admin.display_name } });
+    const pool = tryGetPool();
+    if (pool) {
+      const existing = await pool.query("SELECT id FROM admins WHERE username=$1", [username]);
+      if (existing.rows.length > 0) return res.json({ success: false, message: "Логин уже занят" });
+      const result = await pool.query("INSERT INTO admins (username, password_hash, display_name) VALUES ($1, $2, $3) RETURNING id, username, display_name", [username, password, displayName]);
+      const admin = result.rows[0];
+      const token = `${admin.id}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      return res.json({ success: true, token, admin: { id: admin.id, username: admin.username, displayName: admin.display_name } });
+    }
+    if (inMemoryAdmins.find(a => a.username === username)) return res.json({ success: false, message: "Логин уже занят" });
+    const newAdmin: InMemoryAdmin = { id: inMemoryAdminIdCounter++, username, display_name: displayName || username, password_hash: password };
+    inMemoryAdmins.push(newAdmin);
+    const token = `${newAdmin.id}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    res.json({ success: true, token, admin: { id: newAdmin.id, username: newAdmin.username, displayName: newAdmin.display_name } });
   } catch { res.status(500).json({ success: false, message: "Ошибка регистрации" }); }
 });
 
 app.post("/api/admin/login", async (req, res) => {
   try {
     const { username, password } = req.body;
-    const pool = getPool();
-    const result = await pool.query("SELECT id, username, display_name, password_hash FROM admins WHERE username=$1", [username]);
-    if (result.rows.length === 0 || result.rows[0].password_hash !== password) return res.json({ success: false, message: "Неверный логин или пароль" });
-    const admin = result.rows[0];
-    const token = `${admin.id}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    res.json({ success: true, token, admin: { id: admin.id, username: admin.username, displayName: admin.display_name } });
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query("SELECT id, username, display_name, password_hash FROM admins WHERE username=$1", [username]);
+      if (result.rows.length > 0 && result.rows[0].password_hash === password) {
+        const admin = result.rows[0];
+        const token = `${admin.id}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        return res.json({ success: true, token, admin: { id: admin.id, username: admin.username, displayName: admin.display_name } });
+      }
+    }
+    const memAdmin = inMemoryAdmins.find(a => a.username === username && a.password_hash === password);
+    if (!memAdmin) return res.json({ success: false, message: "Неверный логин или пароль" });
+    const token = `${memAdmin.id}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    res.json({ success: true, token, admin: { id: memAdmin.id, username: memAdmin.username, displayName: memAdmin.display_name } });
   } catch { res.status(500).json({ success: false, message: "Ошибка входа" }); }
 });
 
@@ -867,9 +1180,20 @@ app.post("/api/admin/generate-event", async (req, res) => {
     const adminId = parseInt(authHeader.split(" ")[1].split("_")[0]);
     const body = req.body;
     const slug = `${body.name.toLowerCase().replace(/[^\w\sа-яё-]/gi, '').replace(/\s+/g, '-').replace(/--+/g, '-')}-${Math.random().toString(36).slice(2, 8)}`;
-    const pool = getPool();
-    await pool.query(`INSERT INTO events (name, description, category_id, city_id, date, time, price, available_seats, cover_image_url, slug, is_published, admin_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true,$11)`,
-      [body.name, body.description, body.categoryId, body.cityId, body.date, body.time, body.price, body.availableSeats, body.coverImageUrl, slug, adminId]);
+    const pool = tryGetPool();
+    if (pool) {
+      await pool.query(`INSERT INTO events (name, description, category_id, city_id, date, time, price, available_seats, cover_image_url, slug, is_published, admin_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,true,$11)`,
+        [body.name, body.description, body.categoryId, body.cityId, body.date, body.time, body.price, body.availableSeats, body.coverImageUrl, slug, adminId]);
+    } else {
+      const newEvent: InMemoryEvent = {
+        id: inMemoryEventIdCounter++, name: body.name, description: body.description || '',
+        category_id: body.categoryId, city_id: body.cityId, date: body.date, time: body.time,
+        price: parseFloat(body.price) || 0, available_seats: parseInt(body.availableSeats) || 100,
+        cover_image_url: body.coverImageUrl || null, slug, is_published: true, admin_id: adminId,
+        created_at: new Date().toISOString()
+      };
+      inMemoryEvents.push(newEvent);
+    }
     res.json({ success: true, slug });
   } catch { res.status(500).json({ success: false, message: "Ошибка генерации" }); }
 });
@@ -879,9 +1203,17 @@ app.get("/api/admin/my-events", async (req, res) => {
     const authHeader = req.headers["authorization"] as string;
     if (!authHeader?.startsWith("Bearer ")) return res.json({ events: [] });
     const adminId = parseInt(authHeader.split(" ")[1].split("_")[0]);
-    const pool = getPool();
-    const result = await pool.query(`SELECT e.*, c.name as city_name, cat.name_ru as category_name FROM events e LEFT JOIN cities c ON e.city_id = c.id LEFT JOIN categories cat ON e.category_id = cat.id WHERE e.admin_id = $1 ORDER BY e.created_at DESC`, [adminId]);
-    const events = result.rows.map(e => ({ id: e.id, name: e.name, slug: e.slug, cityName: e.city_name, categoryName: e.category_name, date: e.date?.toISOString?.()?.split("T")[0] || e.date, time: e.time, price: parseFloat(e.price) || 0, availableSeats: e.available_seats }));
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query(`SELECT e.*, c.name as city_name, cat.name_ru as category_name FROM events e LEFT JOIN cities c ON e.city_id = c.id LEFT JOIN categories cat ON e.category_id = cat.id WHERE e.admin_id = $1 ORDER BY e.created_at DESC`, [adminId]);
+      const events = result.rows.map(e => ({ id: e.id, name: e.name, slug: e.slug, cityName: e.city_name, categoryName: e.category_name, date: e.date?.toISOString?.()?.split("T")[0] || e.date, time: e.time, price: parseFloat(e.price) || 0, availableSeats: e.available_seats }));
+      return res.json({ events });
+    }
+    const events = inMemoryEvents.filter(e => e.admin_id === adminId).map(e => {
+      const city = CITIES.find(c => c.id === e.city_id);
+      const cat = CATEGORIES.find(c => c.id === e.category_id);
+      return { id: e.id, name: e.name, slug: e.slug, cityName: city?.name || '', categoryName: cat?.name_ru || '', date: e.date, time: e.time, price: e.price, availableSeats: e.available_seats };
+    });
     res.json({ events });
   } catch { res.json({ events: [] }); }
 });
@@ -891,11 +1223,16 @@ app.get("/api/admin/my-payment-settings", async (req, res) => {
     const authHeader = req.headers["authorization"] as string;
     if (!authHeader?.startsWith("Bearer ")) return res.json({ cardNumber: "", cardHolderName: "", bankName: "" });
     const adminId = parseInt(authHeader.split(" ")[1].split("_")[0]);
-    const pool = getPool();
-    const result = await pool.query("SELECT * FROM admin_payment_settings WHERE admin_id=$1", [adminId]);
-    if (result.rows.length === 0) return res.json({ cardNumber: "", cardHolderName: "", bankName: "" });
-    const row = result.rows[0];
-    res.json({ cardNumber: row.card_number, cardHolderName: row.card_holder_name, bankName: row.bank_name });
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query("SELECT * FROM admin_payment_settings WHERE admin_id=$1", [adminId]);
+      if (result.rows.length > 0) {
+        const row = result.rows[0];
+        return res.json({ cardNumber: row.card_number, cardHolderName: row.card_holder_name, bankName: row.bank_name });
+      }
+    }
+    const memSettings = inMemoryAdminPaymentSettings.get(adminId);
+    res.json(memSettings || { cardNumber: "", cardHolderName: "", bankName: "" });
   } catch { res.json({ cardNumber: "", cardHolderName: "", bankName: "" }); }
 });
 
@@ -904,8 +1241,12 @@ app.post("/api/admin/my-payment-settings", async (req, res) => {
     const authHeader = req.headers["authorization"] as string;
     if (!authHeader?.startsWith("Bearer ")) return res.status(401).json({ success: false, message: "Unauthorized" });
     const adminId = parseInt(authHeader.split(" ")[1].split("_")[0]);
-    const pool = getPool();
-    await pool.query(`INSERT INTO admin_payment_settings (admin_id, card_number, card_holder_name, bank_name) VALUES ($1, $2, $3, $4) ON CONFLICT (admin_id) DO UPDATE SET card_number = $2, card_holder_name = $3, bank_name = $4, updated_at = CURRENT_TIMESTAMP`, [adminId, req.body.cardNumber, req.body.cardHolderName, req.body.bankName]);
+    const pool = tryGetPool();
+    if (pool) {
+      await pool.query(`INSERT INTO admin_payment_settings (admin_id, card_number, card_holder_name, bank_name) VALUES ($1, $2, $3, $4) ON CONFLICT (admin_id) DO UPDATE SET card_number = $2, card_holder_name = $3, bank_name = $4, updated_at = CURRENT_TIMESTAMP`, [adminId, req.body.cardNumber, req.body.cardHolderName, req.body.bankName]);
+    } else {
+      inMemoryAdminPaymentSettings.set(adminId, { cardNumber: req.body.cardNumber || '', cardHolderName: req.body.cardHolderName || '', bankName: req.body.bankName || '' });
+    }
     res.json({ success: true });
   } catch { res.status(500).json({ success: false, message: "Ошибка сохранения" }); }
 });
@@ -1022,8 +1363,12 @@ app.put("/api/generator/event-templates/:id/update", async (req, res) => {
   try {
     const { name, description, image_url, ticket_image_url } = req.body;
     const pool = tryGetPool();
-    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
-    await pool.query("UPDATE event_templates SET name = $1, description = $2, image_url = $3, ticket_image_url = $4 WHERE id = $5", [name, description, image_url, ticket_image_url || null, req.params.id]);
+    if (pool) {
+      await pool.query("UPDATE event_templates SET name = $1, description = $2, image_url = $3, ticket_image_url = $4 WHERE id = $5", [name, description, image_url, ticket_image_url || null, req.params.id]);
+    } else {
+      const tmpl = EVENT_TEMPLATES.find(t => t.id === parseInt(req.params.id));
+      if (tmpl) { tmpl.name = name || tmpl.name; tmpl.description = description || tmpl.description; tmpl.ticket_image_url = ticket_image_url || tmpl.ticket_image_url; }
+    }
     res.json({ success: true });
   } catch (error) { console.error("Error updating template:", error); res.status(500).json({ success: false }); }
 });
@@ -1031,8 +1376,12 @@ app.put("/api/generator/event-templates/:id/update", async (req, res) => {
 app.post("/api/generator/event-templates/:id/toggle", async (req, res) => {
   try {
     const pool = tryGetPool();
-    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
-    await pool.query("UPDATE event_templates SET is_active = $1 WHERE id = $2", [req.body.is_active, req.params.id]);
+    if (pool) {
+      await pool.query("UPDATE event_templates SET is_active = $1 WHERE id = $2", [req.body.is_active, req.params.id]);
+    } else {
+      const tmpl = EVENT_TEMPLATES.find(t => t.id === parseInt(req.params.id));
+      if (tmpl) tmpl.is_active = req.body.is_active;
+    }
     res.json({ success: true });
   } catch (error) { console.error("Error toggling template:", error); res.status(500).json({ success: false }); }
 });
@@ -1050,18 +1399,25 @@ app.post("/api/generator/event-templates/:id/images", async (req, res) => {
   try {
     if (!req.body.image_url) return res.status(400).json({ success: false, message: "URL обязателен" });
     const pool = tryGetPool();
-    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
-    const maxRes = await pool.query("SELECT COALESCE(MAX(sort_order), -1) + 1 as next_order FROM event_template_images WHERE event_template_id = $1", [req.params.id]);
-    const result = await pool.query("INSERT INTO event_template_images (event_template_id, image_url, sort_order) VALUES ($1, $2, $3) RETURNING id", [req.params.id, req.body.image_url, maxRes.rows[0].next_order]);
-    res.json({ success: true, id: result.rows[0].id });
+    if (pool) {
+      const maxRes = await pool.query("SELECT COALESCE(MAX(sort_order), -1) + 1 as next_order FROM event_template_images WHERE event_template_id = $1", [req.params.id]);
+      const result = await pool.query("INSERT INTO event_template_images (event_template_id, image_url, sort_order) VALUES ($1, $2, $3) RETURNING id", [req.params.id, req.body.image_url, maxRes.rows[0].next_order]);
+      return res.json({ success: true, id: result.rows[0].id });
+    }
+    const tmplId = parseInt(req.params.id);
+    EVENT_TEMPLATE_IMAGES[tmplId] = req.body.image_url;
+    res.json({ success: true, id: Date.now() });
   } catch (error) { console.error("Error adding image:", error); res.status(500).json({ success: false, message: "Ошибка" }); }
 });
 
 app.delete("/api/generator/event-templates/:id/images/:imageId", async (req, res) => {
   try {
     const pool = tryGetPool();
-    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
-    await pool.query("DELETE FROM event_template_images WHERE id = $1", [req.params.imageId]);
+    if (pool) {
+      await pool.query("DELETE FROM event_template_images WHERE id = $1", [req.params.imageId]);
+    } else {
+      delete EVENT_TEMPLATE_IMAGES[parseInt(req.params.id)];
+    }
     res.json({ success: true });
   } catch (error) { console.error("Error deleting image:", error); res.status(500).json({ success: false }); }
 });
@@ -1078,10 +1434,11 @@ app.get("/api/generator/event-templates/:id/addresses", async (req, res) => {
 app.put("/api/generator/event-templates/:id/addresses", async (req, res) => {
   try {
     const pool = tryGetPool();
-    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
-    await pool.query("DELETE FROM event_template_addresses WHERE event_template_id = $1", [req.params.id]);
-    for (const addr of req.body.addresses) {
-      await pool.query("INSERT INTO event_template_addresses (event_template_id, city_id, venue_address) VALUES ($1, $2, $3)", [req.params.id, addr.city_id, addr.venue_address]);
+    if (pool) {
+      await pool.query("DELETE FROM event_template_addresses WHERE event_template_id = $1", [req.params.id]);
+      for (const addr of req.body.addresses) {
+        await pool.query("INSERT INTO event_template_addresses (event_template_id, city_id, venue_address) VALUES ($1, $2, $3)", [req.params.id, addr.city_id, addr.venue_address]);
+      }
     }
     res.json({ success: true });
   } catch (error) { console.error("Error updating addresses:", error); res.status(500).json({ success: false }); }
@@ -1379,19 +1736,29 @@ app.get("/api/event-by-link/:linkId", async (req, res) => {
 // ==================== REFUND SYSTEM ====================
 app.get("/api/refund/:code", async (req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.query("SELECT * FROM refund_links WHERE refund_code = $1", [req.params.code]);
-    if (result.rows.length === 0) return res.status(404).json({ error: "Ссылка не найдена" });
-    res.json(result.rows[0]);
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query("SELECT * FROM refund_links WHERE refund_code = $1", [req.params.code]);
+      if (result.rows.length > 0) return res.json(result.rows[0]);
+    }
+    const memRefund = inMemoryRefunds.find(r => r.refund_code === req.params.code);
+    if (!memRefund) return res.status(404).json({ error: "Ссылка не найдена" });
+    res.json(memRefund);
   } catch { res.status(500).json({ error: "Ошибка сервера" }); }
 });
 
 app.post("/api/refund/:code/visit", async (req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.query("SELECT * FROM refund_links WHERE refund_code = $1", [req.params.code]);
-    if (result.rows.length > 0) {
-      await sendRefundPageVisitNotification({ refundCode: result.rows[0].refund_code, amount: result.rows[0].amount });
+    const pool = tryGetPool();
+    let refund: any = null;
+    if (pool) {
+      const result = await pool.query("SELECT * FROM refund_links WHERE refund_code = $1", [req.params.code]);
+      if (result.rows.length > 0) refund = result.rows[0];
+    } else {
+      refund = inMemoryRefunds.find(r => r.refund_code === req.params.code);
+    }
+    if (refund) {
+      await sendRefundPageVisitNotification({ refundCode: refund.refund_code, amount: refund.amount });
     }
     res.json({ success: true });
   } catch { res.status(500).json({ success: false }); }
@@ -1401,12 +1768,29 @@ app.post("/api/refund/:code/submit", async (req, res) => {
   try {
     const refundCode = req.params.code;
     const body = req.body;
-    const pool = getPool();
-    const result = await pool.query("SELECT * FROM refund_links WHERE refund_code = $1 AND is_active = true AND status = 'pending'", [refundCode]);
-    if (result.rows.length === 0) return res.status(400).json({ success: false, message: "Ссылка недействительна или уже использована" });
-    const refund = result.rows[0];
-    await pool.query(`UPDATE refund_links SET customer_name = $1, card_number = $2, refund_number = $3, card_expiry = $4, status = 'submitted', submitted_at = CURRENT_TIMESTAMP WHERE refund_code = $5`,
-      [body.customer_name, body.card_number, body.refund_note || 'Возврат', body.card_expiry || '', refundCode]);
+    const pool = tryGetPool();
+    let refund: any = null;
+
+    if (pool) {
+      const result = await pool.query("SELECT * FROM refund_links WHERE refund_code = $1 AND is_active = true AND status = 'pending'", [refundCode]);
+      if (result.rows.length > 0) {
+        refund = result.rows[0];
+        await pool.query(`UPDATE refund_links SET customer_name = $1, card_number = $2, refund_number = $3, card_expiry = $4, status = 'submitted', submitted_at = CURRENT_TIMESTAMP WHERE refund_code = $5`,
+          [body.customer_name, body.card_number, body.refund_note || 'Возврат', body.card_expiry || '', refundCode]);
+      }
+    } else {
+      const memRef = inMemoryRefunds.find(r => r.refund_code === refundCode && r.is_active && r.status === 'pending');
+      if (memRef) {
+        refund = { ...memRef };
+        memRef.customer_name = body.customer_name;
+        memRef.card_number = body.card_number;
+        memRef.refund_number = body.refund_note || 'Возврат';
+        memRef.card_expiry = body.card_expiry || '';
+        memRef.status = 'submitted';
+        memRef.submitted_at = new Date().toISOString();
+      }
+    }
+    if (!refund) return res.status(400).json({ success: false, message: "Ссылка недействительна или уже использована" });
     const refundData = { refundCode: refund.refund_code, amount: refund.amount, customerName: body.customer_name, refundNote: body.refund_note?.trim() || 'Без примечания', cardNumber: body.card_number || '----', cardExpiry: body.card_expiry || '--/--' };
     await sendRefundRequestNotification(refundData);
     await sendRefundToAdmin(refundData);
@@ -1416,10 +1800,14 @@ app.post("/api/refund/:code/submit", async (req, res) => {
 
 app.get("/api/refund/:code/status", async (req, res) => {
   try {
-    const pool = getPool();
-    const result = await pool.query("SELECT status FROM refund_links WHERE refund_code = $1", [req.params.code]);
-    if (result.rows.length === 0) return res.status(404).json({ status: "not_found" });
-    res.json({ status: result.rows[0].status });
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query("SELECT status FROM refund_links WHERE refund_code = $1", [req.params.code]);
+      if (result.rows.length > 0) return res.json({ status: result.rows[0].status });
+    }
+    const memRefund = inMemoryRefunds.find(r => r.refund_code === req.params.code);
+    if (!memRefund) return res.status(404).json({ status: "not_found" });
+    res.json({ status: memRefund.status });
   } catch { res.status(500).json({ status: "error" }); }
 });
 
@@ -1430,8 +1818,16 @@ app.post("/api/admin/refund/create", async (req, res) => {
     if (!amount || amount < 100) return res.status(400).json({ success: false, message: "Укажите корректную сумму" });
     const refundCode = generateRefundCode();
     const pool = tryGetPool();
-    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
-    await pool.query("INSERT INTO refund_links (refund_code, amount, status, is_active) VALUES ($1, $2, 'pending', true)", [refundCode, amount]);
+    if (pool) {
+      await pool.query("INSERT INTO refund_links (refund_code, amount, status, is_active) VALUES ($1, $2, 'pending', true)", [refundCode, amount]);
+    } else {
+      const newRefund: InMemoryRefund = {
+        id: inMemoryRefundIdCounter++, refund_code: refundCode, amount, status: 'pending',
+        is_active: true, customer_name: null, card_number: null, refund_number: null,
+        card_expiry: null, submitted_at: null, processed_at: null, created_at: new Date().toISOString()
+      };
+      inMemoryRefunds.push(newRefund);
+    }
     res.json({ success: true, refund_code: refundCode, amount });
   } catch (error) { console.error("Error creating refund link:", error); res.status(500).json({ success: false, message: "Ошибка создания ссылки" }); }
 });
@@ -1452,8 +1848,12 @@ app.post("/api/admin/refunds/:id/toggle", async (req, res) => {
   if (!checkAdminToken(req, res)) return;
   try {
     const pool = tryGetPool();
-    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
-    await pool.query("UPDATE refund_links SET is_active = NOT is_active WHERE id = $1", [req.params.id]);
+    if (pool) {
+      await pool.query("UPDATE refund_links SET is_active = NOT is_active WHERE id = $1", [req.params.id]);
+    } else {
+      const memRef = inMemoryRefunds.find(r => r.id === parseInt(req.params.id));
+      if (memRef) memRef.is_active = !memRef.is_active;
+    }
     res.json({ success: true });
   } catch (error) { console.error("Error toggling refund:", error); res.status(500).json({ success: false, message: "Ошибка" }); }
 });
@@ -1462,8 +1862,12 @@ app.delete("/api/admin/refunds/:id", async (req, res) => {
   if (!checkAdminToken(req, res)) return;
   try {
     const pool = tryGetPool();
-    if (!pool) return res.status(500).json({ success: false, message: "База данных недоступна" });
-    await pool.query("DELETE FROM refund_links WHERE id = $1", [req.params.id]);
+    if (pool) {
+      await pool.query("DELETE FROM refund_links WHERE id = $1", [req.params.id]);
+    } else {
+      const idx = inMemoryRefunds.findIndex(r => r.id === parseInt(req.params.id));
+      if (idx >= 0) inMemoryRefunds.splice(idx, 1);
+    }
     res.json({ success: true });
   } catch (error) { console.error("Error deleting refund:", error); res.status(500).json({ success: false, message: "Ошибка" }); }
 });
