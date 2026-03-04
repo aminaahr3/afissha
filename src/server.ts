@@ -187,26 +187,32 @@ app.post("/api/admin/verify", async (req, res) => {
 // ==================== TICKET DATA ====================
 app.get("/api/ticket-data", async (_req, res) => {
   try {
-    const pool = getPool();
-    const eventsResult = await pool.query(`
-      SELECT e.id, e.name, e.description, c.name_ru as category_name, ci.name as city_name,
-             e.date::text, e.time::text, e.price::numeric as price, e.available_seats
-      FROM events e JOIN categories c ON e.category_id = c.id JOIN cities ci ON e.city_id = ci.id
-      WHERE e.available_seats > 0 ORDER BY e.date ASC
-    `);
-    const events = eventsResult.rows.map(r => ({
-      id: r.id, name: r.name, description: r.description, categoryName: r.category_name,
-      cityName: r.city_name, date: r.date, time: r.time, price: parseFloat(r.price) || 0,
-      availableSeats: r.available_seats,
-    }));
-    const catResult = await pool.query("SELECT id, name, name_ru FROM categories ORDER BY name_ru");
-    const categories = catResult.rows.map(r => ({ id: r.id, name: r.name, nameRu: r.name_ru }));
-    const cityResult = await pool.query("SELECT id, name FROM cities ORDER BY name");
-    const cities = cityResult.rows.map(r => ({ id: r.id, name: r.name }));
-    res.json({ events, categories, cities });
+    const pool = tryGetPool();
+    if (pool) {
+      const eventsResult = await pool.query(`
+        SELECT e.id, e.name, e.description, c.name_ru as category_name, ci.name as city_name,
+               e.date::text, e.time::text, e.price::numeric as price, e.available_seats
+        FROM events e JOIN categories c ON e.category_id = c.id JOIN cities ci ON e.city_id = ci.id
+        WHERE e.available_seats > 0 ORDER BY e.date ASC
+      `);
+      const events = eventsResult.rows.map(r => ({
+        id: r.id, name: r.name, description: r.description, categoryName: r.category_name,
+        cityName: r.city_name, date: r.date, time: r.time, price: parseFloat(r.price) || 0,
+        availableSeats: r.available_seats,
+      }));
+      const catResult = await pool.query("SELECT id, name, name_ru FROM categories ORDER BY name_ru");
+      const categories = catResult.rows.map(r => ({ id: r.id, name: r.name, nameRu: r.name_ru }));
+      const cityResult = await pool.query("SELECT id, name FROM cities ORDER BY name");
+      const cities = cityResult.rows.map(r => ({ id: r.id, name: r.name }));
+      return res.json({ events, categories, cities });
+    }
+    const categories = CATEGORIES.map(c => ({ id: c.id, name: c.name, nameRu: c.name_ru }));
+    const cities = [...CITIES].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    res.json({ events: [], categories, cities });
   } catch (error) {
-    console.error("Error fetching ticket data:", error);
-    res.status(500).json({ error: "Failed to fetch data" });
+    const categories = CATEGORIES.map(c => ({ id: c.id, name: c.name, nameRu: c.name_ru }));
+    const cities = [...CITIES].sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    res.json({ events: [], categories, cities });
   }
 });
 
