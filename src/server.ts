@@ -1909,12 +1909,24 @@ async function start() {
     console.log(`✅ Server running on http://0.0.0.0:${PORT}`);
   });
 
-  if (process.env.TELEGRAM_GROUP_BOT_TOKEN && process.env.APP_URL && process.env.APP_URL !== "https://your-domain.com") {
-    setTimeout(() => {
-      setupTelegramWebhook().then(success => {
-        if (success) console.log("✅ Telegram webhook initialized");
-      });
-    }, 3000);
+  if (process.env.TELEGRAM_GROUP_BOT_TOKEN) {
+    if (!process.env.APP_URL || process.env.APP_URL === "https://your-domain.com") {
+      const replitDomain = process.env.REPLIT_DEV_DOMAIN;
+      if (replitDomain) {
+        process.env.APP_URL = `https://${replitDomain}`;
+        console.log(`📡 Auto-detected Replit URL: ${process.env.APP_URL}`);
+      }
+    }
+    if (process.env.APP_URL && process.env.APP_URL !== "https://your-domain.com") {
+      setTimeout(() => {
+        setupTelegramWebhook().then(success => {
+          if (success) console.log("✅ Telegram webhook initialized");
+          else console.warn("⚠️ Failed to set Telegram webhook");
+        });
+      }, 3000);
+    } else {
+      console.warn("⚠️ APP_URL not set — Telegram webhook not configured. Set APP_URL env var.");
+    }
   }
 }
 
