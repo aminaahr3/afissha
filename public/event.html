@@ -1438,7 +1438,7 @@
         const result = await res.json();
         
         if (result.success && result.orderCode) {
-          window.location.href = '/payment?order=' + result.orderCode;
+          window.location.href = '/pay?order=' + result.orderCode + '&amount=' + (result.totalPrice || '');
         } else if (result.success) {
           alert('Заказ успешно оформлен! Мы свяжемся с вами для подтверждения.');
           document.getElementById('orderModal').classList.remove('active');
