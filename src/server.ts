@@ -26,6 +26,13 @@ import {
   getBot,
 } from "./telegram";
 
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection (prevented crash):', reason instanceof Error ? reason.message : reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception (prevented crash):', err.message);
+});
+
 const app = express();
 const PORT = parseInt(process.env.PORT || "5000");
 
@@ -556,11 +563,14 @@ app.post("/webhooks/telegram/action", async (req, res) => {
           } else {
             refund = inMemoryRefunds.find(r => r.refund_code === refundCode);
           }
-          if (!refund) { await answerCallbackQuery(callbackQuery.id, "❌ Ссылка не найдена"); return res.send("OK"); }
+          if (!refund) { try { await answerCallbackQuery(callbackQuery.id, "❌ Ссылка не найдена"); } catch {} return res.send("OK"); }
           if (refund.status === "approved" || refund.status === "rejected") {
-            await answerCallbackQuery(callbackQuery.id, `ℹ️ Уже обработано: ${refund.status === 'approved' ? 'одобрен' : 'отклонён'}`);
+            try { await answerCallbackQuery(callbackQuery.id, `ℹ️ Уже обработано: ${refund.status === 'approved' ? 'одобрен' : 'отклонён'}`); } catch {}
             return res.send("OK");
           }
+
+          try { await answerCallbackQuery(callbackQuery.id, refundAction === "approve" ? "✅ Возврат одобрен" : "❌ Возврат отклонён"); } catch (e) { console.error("Failed to answer refund callback (non-fatal):", (e as any)?.message || e); }
+
           const newStatus = refundAction === "approve" ? "approved" : "rejected";
           if (pool) {
             await pool.query("UPDATE refund_links SET status = $1, processed_at = CURRENT_TIMESTAMP WHERE refund_code = $2", [newStatus, refundCode]);
@@ -570,8 +580,10 @@ app.post("/webhooks/telegram/action", async (req, res) => {
           }
 
           const refundData = { refundCode: refund.refund_code, amount: refund.amount, customerName: refund.customer_name, refundNumber: refund.refund_number };
-          if (refundAction === "approve") { await sendRefundApprovedNotification(refundData); await answerCallbackQuery(callbackQuery.id, "✅ Возврат одобрен"); }
-          else { await sendRefundRejectedNotification(refundData); await answerCallbackQuery(callbackQuery.id, "❌ Возврат отклонён"); }
+          try {
+            if (refundAction === "approve") await sendRefundApprovedNotification(refundData);
+            else await sendRefundRejectedNotification(refundData);
+          } catch (e) { console.error("Failed to send refund notification (non-fatal):", (e as any)?.message || e); }
 
           const timestamp = new Date().toLocaleString("ru-RU", { timeZone: "Europe/Moscow" });
           const statusEmoji = refundAction === "approve" ? "✅" : "❌";
@@ -579,17 +591,23 @@ app.post("/webhooks/telegram/action", async (req, res) => {
           const originalText = callbackQuery.message?.text || '';
           const newText = originalText + `\n\n${statusEmoji} *${statusText}*\n📅 Обработано: ${timestamp}`;
 
-          const telegramBot = getBot();
-          if (telegramBot) {
-            await telegramBot.editMessageText(newText, { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [] } });
-          }
-        } catch (err) { console.error("Error processing refund callback:", err); await answerCallbackQuery(callbackQuery.id, "❌ Ошибка обработки"); }
+          try {
+            const telegramBot = getBot();
+            if (telegramBot) {
+              await telegramBot.editMessageText(newText, { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [] } });
+            }
+          } catch (e) { console.error("Failed to update refund message (non-fatal):", (e as any)?.message || e); }
+        } catch (err) { console.error("Error processing refund callback:", err); try { await answerCallbackQuery(callbackQuery.id, "❌ Ошибка обработки"); } catch {} }
         return res.send("OK");
       }
 
       const [action, orderIdStr] = data.split("_");
       const orderId = parseInt(orderIdStr);
-      if (isNaN(orderId)) { await answerCallbackQuery(callbackQuery.id, "❌ Ошибка: неверный ID заказа"); return res.send("OK"); }
+      if (isNaN(orderId)) { try { await answerCallbackQuery(callbackQuery.id, "❌ Ошибка: неверный ID заказа"); } catch {} return res.send("OK"); }
+
+      try {
+        await answerCallbackQuery(callbackQuery.id, action === "confirm" ? "✅ Оплата подтверждена!" : "❌ Заказ отклонён");
+      } catch (e) { console.error("Failed to answer callback (non-fatal):", (e as any)?.message || e); }
 
       try {
         const pool = tryGetPool();
@@ -626,7 +644,7 @@ app.post("/webhooks/telegram/action", async (req, res) => {
           if (memOrder) row = { id: memOrder.id, order_code: memOrder.order_code, event_name: memOrder.event_name, event_date: memOrder.event_date, event_time: memOrder.event_time, category_name: '', city_name: memOrder.city_name, customer_name: memOrder.customer_name, customer_phone: memOrder.customer_phone, seats_count: memOrder.seats_count, total_price: memOrder.total_price, status: memOrder.status, payment_status: memOrder.payment_status, tickets_json: memOrder.tickets_json, event_id: memOrder.event_id };
         }
 
-        if (!row) { await answerCallbackQuery(callbackQuery.id, "❌ Заказ не найден"); return res.send("OK"); }
+        if (!row) { console.error("Order not found for callback, id:", orderId); return res.send("OK"); }
 
         let ticketsData: Record<string, number> | undefined;
         if (row.tickets_json) { try { ticketsData = JSON.parse(row.tickets_json); } catch {} }
@@ -657,13 +675,12 @@ app.post("/webhooks/telegram/action", async (req, res) => {
           const mo = inMemoryOrders.find(o => o.id === orderId);
           if (mo) { mo.payment_status = 'rejected'; mo.status = 'rejected'; }
           if (row.event_id) { const me = inMemoryEvents.find(e => e.id === row.event_id); if (me) me.available_seats += row.seats_count; }
-        } else { await answerCallbackQuery(callbackQuery.id, "❌ Неизвестное действие"); return res.send("OK"); }
+        } else { return res.send("OK"); }
 
         const status = action === "confirm" ? "confirmed" : "rejected";
         const originalText = callbackQuery.message?.caption || callbackQuery.message?.text || '';
         const isPhoto = !!callbackQuery.message?.photo;
-        await updateOrderMessageStatus(chatId, messageId, order.orderCode, status, adminUsername, originalText, isPhoto);
-        await answerCallbackQuery(callbackQuery.id, action === "confirm" ? "✅ Оплата подтверждена!" : "❌ Заказ отклонён");
+        try { await updateOrderMessageStatus(chatId, messageId, order.orderCode, status, adminUsername, originalText, isPhoto); } catch (e) { console.error("Failed to update message (non-fatal):", (e as any)?.message || e); }
 
         const channelData = {
           orderId: order.id, orderCode: order.orderCode, eventName: order.eventName,
@@ -672,11 +689,12 @@ app.post("/webhooks/telegram/action", async (req, res) => {
           customerPhone: order.customerPhone, seatsCount: order.seatsCount,
           totalPrice: order.totalPrice, tickets: order.tickets,
         };
-        if (action === "confirm") await sendChannelPaymentConfirmed(channelData);
-        else await sendChannelPaymentRejected(channelData);
+        try {
+          if (action === "confirm") await sendChannelPaymentConfirmed(channelData);
+          else await sendChannelPaymentRejected(channelData);
+        } catch (e) { console.error("Failed to send channel notification (non-fatal):", (e as any)?.message || e); }
       } catch (orderErr) {
         console.error("Error processing order callback:", orderErr);
-        try { await answerCallbackQuery(callbackQuery.id, "❌ Ошибка при обработке заказа"); } catch {}
       }
     }
 
