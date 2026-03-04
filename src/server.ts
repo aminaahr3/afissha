@@ -606,7 +606,7 @@ app.post("/webhooks/telegram/action", async (req, res) => {
       if (isNaN(orderId)) { try { await answerCallbackQuery(callbackQuery.id, "❌ Ошибка: неверный ID заказа"); } catch {} return res.send("OK"); }
 
       try {
-        await answerCallbackQuery(callbackQuery.id, action === "confirm" ? "✅ Оплата подтверждена!" : "❌ Заказ отклонён");
+        await answerCallbackQuery(callbackQuery.id, "⏳ Обработка...");
       } catch (e) { console.error("Failed to answer callback (non-fatal):", (e as any)?.message || e); }
 
       try {
