@@ -1840,7 +1840,7 @@ app.get("/api/admin/refunds", async (req, res) => {
       const result = await pool.query("SELECT * FROM refund_links ORDER BY created_at DESC");
       return res.json({ refunds: result.rows });
     }
-    res.json({ refunds: [] });
+    res.json({ refunds: inMemoryRefunds.slice().reverse() });
   } catch { res.json({ refunds: [] }); }
 });
 
