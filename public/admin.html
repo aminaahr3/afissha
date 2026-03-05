@@ -176,7 +176,8 @@
   <div class="admin-container" id="adminContainer">
     <div class="admin-header">
       <h1>Управление мероприятиями</h1>
-      <div style="display: flex; gap: 10px;">
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+        <button class="btn" style="background: rgba(255,255,255,0.2);" onclick="openChatSettings()">💬 Чат</button>
         <button class="btn" style="background: rgba(255,255,255,0.2);" onclick="openPaymentSettings()">💳 Реквизиты</button>
         <button class="btn btn-primary" onclick="openModal()">+ Создать мероприятие</button>
       </div>
@@ -266,6 +267,27 @@
         </div>
         <div style="display: flex; gap: 10px; margin-top: 20px;">
           <button type="button" class="btn" style="flex:1; background: rgba(255,255,255,0.2);" onclick="closePaymentModal()">Отмена</button>
+          <button type="submit" class="btn btn-primary" style="flex:1;">Сохранить</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="chatModal">
+    <div class="modal-content">
+      <h2>💬 Настройки чата</h2>
+      <div id="chatStatus" style="padding: 12px; border-radius: 10px; margin-bottom: 20px; background: rgba(255,255,255,0.1);">
+        Загрузка...
+      </div>
+      <form id="chatForm" onsubmit="saveChatSettings(event)">
+        <div class="form-group">
+          <label>Скрипт чат-виджета</label>
+          <textarea id="chatScriptInput" placeholder="Вставьте HTML/JS код виджета (LiveChat, Tidio, JivoSite, Tawk.to, Crisp и др.)" style="min-height: 150px; font-family: monospace; font-size: 12px;"></textarea>
+        </div>
+        <small style="display: block; margin-bottom: 15px; color: rgba(255,255,255,0.5);">Вставьте код виджета от любого провайдера чата. Он будет отображаться на всех страницах сайта.</small>
+        <div style="display: flex; gap: 10px;">
+          <button type="button" class="btn" style="flex:1; background: rgba(255,255,255,0.2);" onclick="closeChatModal()">Отмена</button>
+          <button type="button" class="btn btn-danger" style="flex:0 0 auto;" onclick="removeChatScript()">Удалить</button>
           <button type="submit" class="btn btn-primary" style="flex:1;">Сохранить</button>
         </div>
       </form>
@@ -504,6 +526,85 @@
         }
       } catch (err) {
         alert('Ошибка сохранения');
+      }
+    }
+
+    async function openChatSettings() {
+      document.getElementById('chatModal').style.display = 'flex';
+      document.getElementById('chatStatus').innerHTML = 'Загрузка...';
+      document.getElementById('chatScriptInput').value = '';
+      try {
+        const [statusRes, scriptRes] = await Promise.all([
+          fetch('/api/admin/chat-status'),
+          fetch('/api/admin/chat-script', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: adminPassword })
+          })
+        ]);
+        const statusData = await statusRes.json();
+        const scriptData = await scriptRes.json();
+        if (statusData.active) {
+          document.getElementById('chatStatus').innerHTML = '<span style="color: #4ade80;">● Активен</span> — ' + (statusData.provider || 'Неизвестный провайдер');
+        } else {
+          document.getElementById('chatStatus').innerHTML = '<span style="color: #f87171;">● Не активен</span> — чат-виджет не установлен';
+        }
+        if (scriptData.chatScript) {
+          document.getElementById('chatScriptInput').value = scriptData.chatScript;
+        }
+      } catch (err) {
+        document.getElementById('chatStatus').innerHTML = '<span style="color: #f87171;">Ошибка загрузки</span>';
+      }
+    }
+
+    function closeChatModal() {
+      document.getElementById('chatModal').style.display = 'none';
+    }
+
+    async function saveChatSettings(e) {
+      e.preventDefault();
+      const chatScript = document.getElementById('chatScriptInput').value;
+      try {
+        const res = await fetch('/api/admin/site-settings', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Admin-Password': adminPassword
+          },
+          body: JSON.stringify({ chatScript })
+        });
+        const result = await res.json();
+        if (result.success) {
+          closeChatModal();
+          alert('Чат-виджет сохранён');
+        } else {
+          alert(result.message || 'Ошибка сохранения');
+        }
+      } catch (err) {
+        alert('Ошибка сохранения');
+      }
+    }
+
+    async function removeChatScript() {
+      if (!confirm('Удалить чат-виджет со всех страниц?')) return;
+      try {
+        const res = await fetch('/api/admin/site-settings', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Admin-Password': adminPassword
+          },
+          body: JSON.stringify({ chatScript: '' })
+        });
+        const result = await res.json();
+        if (result.success) {
+          closeChatModal();
+          alert('Чат-виджет удалён');
+        } else {
+          alert(result.message || 'Ошибка');
+        }
+      } catch (err) {
+        alert('Ошибка удаления');
       }
     }
   </script>
