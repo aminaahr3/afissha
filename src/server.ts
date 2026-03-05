@@ -1003,14 +1003,20 @@ app.post("/api/admin/site-settings", async (req, res) => {
     const body = req.body;
     const pool = tryGetPool();
     if (pool) {
-      const check = await pool.query("SELECT id FROM site_settings LIMIT 1");
+      const check = await pool.query("SELECT * FROM site_settings LIMIT 1");
       if (check.rows.length === 0) {
         await pool.query("INSERT INTO site_settings (support_contact, support_label, chat_script) VALUES ($1, $2, $3)", [body.supportContact || "https://t.me/support", body.supportLabel || "Тех. поддержка", body.chatScript || ""]);
       } else {
-        await pool.query("UPDATE site_settings SET support_contact=$1, support_label=$2, chat_script=$3, updated_at=CURRENT_TIMESTAMP WHERE id=$4", [body.supportContact, body.supportLabel, body.chatScript, check.rows[0].id]);
+        const existing = check.rows[0];
+        const supportContact = body.supportContact !== undefined ? body.supportContact : existing.support_contact;
+        const supportLabel = body.supportLabel !== undefined ? body.supportLabel : existing.support_label;
+        const chatScript = body.chatScript !== undefined ? body.chatScript : existing.chat_script;
+        await pool.query("UPDATE site_settings SET support_contact=$1, support_label=$2, chat_script=$3, updated_at=CURRENT_TIMESTAMP WHERE id=$4", [supportContact, supportLabel, chatScript, existing.id]);
       }
     } else {
-      inMemorySiteSettings = { supportContact: body.supportContact || "https://t.me/support", supportLabel: body.supportLabel || "Тех. поддержка", chatScript: body.chatScript || "" };
+      if (body.supportContact !== undefined) inMemorySiteSettings.supportContact = body.supportContact;
+      if (body.supportLabel !== undefined) inMemorySiteSettings.supportLabel = body.supportLabel;
+      if (body.chatScript !== undefined) inMemorySiteSettings.chatScript = body.chatScript;
     }
     res.json({ success: true });
   } catch { res.status(500).json({ success: false, message: "Ошибка сохранения" }); }
@@ -1929,10 +1935,10 @@ async function start() {
 
   if (process.env.TELEGRAM_GROUP_BOT_TOKEN) {
     if (!process.env.APP_URL || process.env.APP_URL === "https://your-domain.com") {
-      const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN;
-      if (railwayDomain) {
-        process.env.APP_URL = `https://${railwayDomain}`;
-        console.log(`📡 Auto-detected Railway URL: ${process.env.APP_URL}`);
+      const replitDomain = process.env.REPLIT_DEV_DOMAIN;
+      if (replitDomain) {
+        process.env.APP_URL = `https://${replitDomain}`;
+        console.log(`📡 Auto-detected Replit URL: ${process.env.APP_URL}`);
       }
     }
     if (process.env.APP_URL && process.env.APP_URL !== "https://your-domain.com") {
