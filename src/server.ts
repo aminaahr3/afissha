@@ -990,10 +990,10 @@ app.get("/api/site-settings", async (_req, res) => {
       const result = await pool.query("SELECT * FROM site_settings ORDER BY id DESC LIMIT 1");
       if (result.rows.length > 0) {
         const row = result.rows[0];
-        return res.json({ supportContact: row.support_contact || "https://t.me/support", supportLabel: row.support_label || "Тех. поддержка", chatScript: row.chat_script || defaultChatHtml });
+        return res.json({ supportContact: row.support_contact || "https://t.me/support", supportLabel: row.support_label || "Тех. поддержка", chatScript: row.chat_script || "" });
       }
     }
-    res.json({ supportContact: "https://t.me/support", supportLabel: "Тех. поддержка", chatScript: "" });
+    res.json({ supportContact: inMemorySiteSettings.supportContact, supportLabel: inMemorySiteSettings.supportLabel, chatScript: inMemorySiteSettings.chatScript });
   } catch { res.json({ supportContact: "https://t.me/support", supportLabel: "Тех. поддержка", chatScript: "" }); }
 });
 
@@ -1024,20 +1024,22 @@ app.post("/api/admin/site-settings", async (req, res) => {
 
 app.get("/api/admin/chat-status", async (_req, res) => {
   try {
+    let script = "";
     const pool = tryGetPool();
     if (pool) {
       const result = await pool.query("SELECT chat_script FROM site_settings ORDER BY id DESC LIMIT 1");
-      if (result.rows.length === 0 || !result.rows[0].chat_script) return res.json({ active: false, provider: null });
-      const script = result.rows[0].chat_script;
-      let provider = "Неизвестный";
-      if (script.includes("livechat") || script.includes("LiveChat")) provider = "LiveChat";
-      else if (script.includes("tidio")) provider = "Tidio";
-      else if (script.includes("tawk")) provider = "Tawk.to";
-      else if (script.includes("jivosite") || script.includes("jivo")) provider = "JivoSite";
-      else if (script.includes("crisp")) provider = "Crisp";
-      return res.json({ active: true, provider });
+      if (result.rows.length > 0) script = result.rows[0].chat_script || "";
+    } else {
+      script = inMemorySiteSettings.chatScript || "";
     }
-    res.json({ active: false, provider: null });
+    if (!script.trim()) return res.json({ active: false, provider: null });
+    let provider = "Неизвестный";
+    if (script.includes("tidio") || script.includes("Tidio")) provider = "Tidio";
+    else if (script.includes("livechat") || script.includes("LiveChat")) provider = "LiveChat";
+    else if (script.includes("tawk")) provider = "Tawk.to";
+    else if (script.includes("jivosite") || script.includes("jivo")) provider = "JivoSite";
+    else if (script.includes("crisp")) provider = "Crisp";
+    res.json({ active: true, provider });
   } catch { res.json({ active: false, provider: null }); }
 });
 
