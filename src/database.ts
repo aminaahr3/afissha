@@ -49,8 +49,6 @@ export async function initDatabase(): Promise<void> {
       console.log("✅ init.sql executed");
     }
 
-    try { await p.query("ALTER TABLE generated_links ADD COLUMN IF NOT EXISTS url_code VARCHAR(10) UNIQUE"); } catch(e) { console.log("url_code column migration skipped"); }
-
     const catCount = await p.query("SELECT COUNT(*) FROM categories");
     const cityCount = await p.query("SELECT COUNT(*) FROM cities");
     const tmplCount = await p.query("SELECT COUNT(*) FROM event_templates");

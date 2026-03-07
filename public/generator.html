@@ -1296,13 +1296,13 @@
         const result = await res.json();
         
         if (result.success) {
-          const urlCode = result.url_code;
+          const linkId = result.link_id;
           
           const citySelect = document.getElementById('citySelect');
           const cityName = citySelect.options[citySelect.selectedIndex].text;
           const citySlug = transliterate(cityName);
           
-          const link = `${window.location.origin}/show/${citySlug}/${eventId}/${urlCode}`;
+          const link = `${window.location.origin}/show/${citySlug}/${eventId}/${linkId}`;
           document.getElementById('generatedLink').value = link;
           document.getElementById('resultSection').classList.add('show');
         } else {

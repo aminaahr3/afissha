@@ -442,19 +442,11 @@
     let links = [];
     let selectedCategory = null;
     
-    function getAdminKey() {
-      return new URLSearchParams(window.location.search).get('key') || '';
-    }
-    function adminRedirect(path) {
-      const k = getAdminKey();
-      window.location.href = path + (k ? (path.includes('?') ? '&' : '?') + 'key=' + k : '');
-    }
-    
     async function checkAuthAndInit() {
       const token = localStorage.getItem('adminToken');
       
       if (!token) {
-        adminRedirect('/admin-login?redirect=/admin-events');
+        window.location.href = '/admin-login?redirect=/admin-events';
         return;
       }
       
@@ -474,12 +466,12 @@
           init();
         } else {
           localStorage.removeItem('adminToken');
-          adminRedirect('/admin-login?redirect=/admin-events');
+          window.location.href = '/admin-login?redirect=/admin-events';
         }
       } catch (err) {
         console.error('Auth validation error:', err);
         localStorage.removeItem('adminToken');
-        adminRedirect('/admin-login?redirect=/admin-events');
+        window.location.href = '/admin-login?redirect=/admin-events';
       }
     }
     
@@ -1023,7 +1015,7 @@
       }
       
       container.innerHTML = filteredLinks.map(link => {
-        const fullUrl = `/show/${transliterate(link.city_name || 'unknown')}/${link.event_template_id || 0}/${link.url_code || link.id}`;
+        const fullUrl = `/show/${transliterate(link.city_name || 'unknown')}/${link.event_template_id || 0}/${link.id}`;
         const seats = link.available_seats !== null && link.available_seats !== undefined ? link.available_seats : '-';
         return `
         <div class="link-card" style="border-left: 4px solid ${link.is_active ? '#4CAF50' : '#f44336'};">
@@ -1130,17 +1122,17 @@
         return;
       }
       
-      const match = input.match(/\/show\/[a-z-]+\/\d+\/(\d{5})(?:\?|$)/i);
+      const match = input.match(/\/(\d+)(?:\?|$)/);
       if (!match) {
-        infoDiv.innerHTML = '<p style="color: #f44336;">Не удалось извлечь код ссылки. Формат: /show/city/eventId/XXXXX</p>';
+        infoDiv.innerHTML = '<p style="color: #f44336;">Не удалось извлечь ID ссылки. Формат: /show/city/eventId/linkId</p>';
         resultDiv.style.display = 'block';
         return;
       }
       
-      const urlCode = match[1];
+      const linkId = match[1];
       
       try {
-        const res = await fetch('/api/generator/link-info-by-code/' + urlCode, {
+        const res = await fetch('/api/generator/link-info/' + linkId, {
           headers: getAuthHeaders()
         });
         

@@ -134,10 +134,8 @@
       .then(res => res.json())
       .then(data => {
         if (data.valid) {
-          const params = new URLSearchParams(window.location.search);
-          const target = params.get('redirect') || '/admin-events';
-          const k = params.get('key') || '';
-          window.location.href = target + (k ? (target.includes('?') ? '&' : '?') + 'key=' + k : '');
+          const target = new URLSearchParams(window.location.search).get('redirect') || '/admin-events';
+          window.location.href = target;
         }
       })
       .catch(() => {
@@ -169,10 +167,8 @@
 
         if (data.success && data.token) {
           localStorage.setItem('adminToken', data.token);
-          const params = new URLSearchParams(window.location.search);
-          const target = params.get('redirect') || '/admin-events';
-          const k = params.get('key') || '';
-          window.location.href = target + (k ? (target.includes('?') ? '&' : '?') + 'key=' + k : '');
+          const target = new URLSearchParams(window.location.search).get('redirect') || '/admin-events';
+          window.location.href = target;
         } else {
           showError(data.message || 'Неверный пароль');
           loginBtn.disabled = false;
