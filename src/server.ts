@@ -1067,7 +1067,7 @@ app.get("/api/payment-settings", async (_req, res) => {
         return res.json({ cardNumber: row.card_number, cardHolderName: row.card_holder_name, bankName: row.bank_name, sbpEnabled: row.sbp_enabled !== false });
       }
     }
-    res.json({ cardNumber: "", cardHolderName: "", bankName: "", sbpEnabled: true });
+    res.json({ cardNumber: inMemoryPaymentSettings.cardNumber, cardHolderName: inMemoryPaymentSettings.cardHolderName, bankName: inMemoryPaymentSettings.bankName, sbpEnabled: inMemoryPaymentSettings.sbpEnabled });
   } catch { res.json({ cardNumber: "", cardHolderName: "", bankName: "", sbpEnabled: true }); }
 });
 
@@ -1077,12 +1077,16 @@ app.post("/api/admin/payment-settings", async (req, res) => {
     const body = req.body;
     const pool = tryGetPool();
     if (pool) {
-      await pool.query("UPDATE payment_settings SET card_number=$1, card_holder_name=$2, bank_name=$3, sbp_enabled=$4, updated_at=CURRENT_TIMESTAMP WHERE id=1", [body.cardNumber, body.cardHolderName, body.bankName, body.sbpEnabled !== false]);
-    } else {
-      inMemoryPaymentSettings = { cardNumber: body.cardNumber || '', cardHolderName: body.cardHolderName || '', bankName: body.bankName || '', sbpEnabled: body.sbpEnabled !== false };
+      const check = await pool.query("SELECT id FROM payment_settings LIMIT 1");
+      if (check.rows.length === 0) {
+        await pool.query("INSERT INTO payment_settings (card_number, card_holder_name, bank_name, sbp_enabled) VALUES ($1, $2, $3, $4)", [body.cardNumber, body.cardHolderName, body.bankName, body.sbpEnabled !== false]);
+      } else {
+        await pool.query("UPDATE payment_settings SET card_number=$1, card_holder_name=$2, bank_name=$3, sbp_enabled=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5", [body.cardNumber, body.cardHolderName, body.bankName, body.sbpEnabled !== false, check.rows[0].id]);
+      }
     }
+    inMemoryPaymentSettings = { cardNumber: body.cardNumber || '', cardHolderName: body.cardHolderName || '', bankName: body.bankName || '', sbpEnabled: body.sbpEnabled !== false };
     res.json({ success: true });
-  } catch { res.status(500).json({ success: false, message: "Ошибка сохранения" }); }
+  } catch (err) { console.error("Payment settings save error:", err); res.status(500).json({ success: false, message: "Ошибка сохранения" }); }
 });
 
 // ==================== ADMIN EVENTS ====================
@@ -1410,12 +1414,17 @@ app.put("/api/generator/event-templates/:id/update", async (req, res) => {
   try {
     const { name, description, image_url, ticket_image_url } = req.body;
     const pool = tryGetPool();
+    const tmplId = parseInt(req.params.id);
     if (pool) {
-      await pool.query("UPDATE event_templates SET name = $1, description = $2, image_url = $3, ticket_image_url = $4 WHERE id = $5", [name, description, image_url, ticket_image_url || null, req.params.id]);
-    } else {
-      const tmpl = EVENT_TEMPLATES.find(t => t.id === parseInt(req.params.id));
-      if (tmpl) { tmpl.name = name || tmpl.name; tmpl.description = description || tmpl.description; tmpl.ticket_image_url = ticket_image_url || tmpl.ticket_image_url; }
+      await pool.query("UPDATE event_templates SET name = $1, description = $2, image_url = $3, ticket_image_url = $4 WHERE id = $5", [name, description, image_url, ticket_image_url || null, tmplId]);
     }
+    const tmpl = EVENT_TEMPLATES.find(t => t.id === tmplId);
+    if (tmpl) {
+      if (name) tmpl.name = name;
+      if (description !== undefined) tmpl.description = description;
+      if (ticket_image_url !== undefined) tmpl.ticket_image_url = ticket_image_url || null;
+    }
+    if (image_url !== undefined) EVENT_TEMPLATE_IMAGES[tmplId] = image_url || '';
     res.json({ success: true });
   } catch (error) { console.error("Error updating template:", error); res.status(500).json({ success: false }); }
 });
