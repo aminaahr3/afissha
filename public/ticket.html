@@ -513,7 +513,7 @@
       
       const imageUrl = ticketData.ticket_image_url || ticketData.image_url;
       const imageStyle = imageUrl 
-        ? `background-image: url(${imageUrl})`
+        ? `background-image: url('${imageUrl.replace(/'/g, "\\'")}')`
         : 'background: linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
       
       let dateTimeStr = '';
