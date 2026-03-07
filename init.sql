@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS event_template_addresses (
 CREATE TABLE IF NOT EXISTS generated_links (
   id SERIAL PRIMARY KEY,
   link_code VARCHAR(255),
+  url_code VARCHAR(10) UNIQUE,
   event_template_id INTEGER REFERENCES event_templates(id),
   city_id INTEGER REFERENCES cities(id),
   event_date DATE,

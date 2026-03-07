@@ -1296,15 +1296,13 @@
         const result = await res.json();
         
         if (result.success) {
-          const linkId = result.link_id;
+          const urlCode = result.url_code;
           
-          // Получаем название города и транслитерируем для URL
           const citySelect = document.getElementById('citySelect');
           const cityName = citySelect.options[citySelect.selectedIndex].text;
           const citySlug = transliterate(cityName);
           
-          // Формат с городом: /show/city/templateId/linkId
-          const link = `${window.location.origin}/show/${citySlug}/${eventId}/${linkId}`;
+          const link = `${window.location.origin}/show/${citySlug}/${eventId}/${urlCode}`;
           document.getElementById('generatedLink').value = link;
           document.getElementById('resultSection').classList.add('show');
         } else {

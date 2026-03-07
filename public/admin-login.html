@@ -134,9 +134,10 @@
       .then(res => res.json())
       .then(data => {
         if (data.valid) {
-          // Redirect to target or default admin page
-          const target = new URLSearchParams(window.location.search).get('redirect') || '/admin-events';
-          window.location.href = target;
+          const params = new URLSearchParams(window.location.search);
+          const target = params.get('redirect') || '/admin-events';
+          const k = params.get('key') || '';
+          window.location.href = target + (k ? (target.includes('?') ? '&' : '?') + 'key=' + k : '');
         }
       })
       .catch(() => {
@@ -168,8 +169,10 @@
 
         if (data.success && data.token) {
           localStorage.setItem('adminToken', data.token);
-          const target = new URLSearchParams(window.location.search).get('redirect') || '/admin-events';
-          window.location.href = target;
+          const params = new URLSearchParams(window.location.search);
+          const target = params.get('redirect') || '/admin-events';
+          const k = params.get('key') || '';
+          window.location.href = target + (k ? (target.includes('?') ? '&' : '?') + 'key=' + k : '');
         } else {
           showError(data.message || 'Неверный пароль');
           loginBtn.disabled = false;

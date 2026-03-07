@@ -55,6 +55,10 @@ function generateLinkCode(): string {
   return result;
 }
 
+function generateUrlCode(): string {
+  return String(10000 + Math.floor(Math.random() * 90000));
+}
+
 function generateOrderCode(): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   let code = "";
@@ -67,6 +71,7 @@ const adminSessionTokens = new Map<string, number>();
 interface InMemoryLink {
   id: number;
   link_code: string;
+  url_code: string;
   event_template_id: number;
   city_id: number;
   event_date: string;
@@ -256,17 +261,15 @@ app.get("/health", async (_req, res) => {
 
 // ==================== HTML PAGES ====================
 app.get("/", serveHtml("index.html"));
-app.get("/admin-login", serveHtml("admin-login.html"));
-app.get("/admin", serveHtml("admin.html"));
-app.get("/admin-events", serveHtml("admin-events.html"));
-app.get("/generator", serveHtml("generator.html"));
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "x7k9m2";
+app.get(`/admin-login`, (req, res) => { if (req.query.key === ADMIN_SECRET) return serveHtml("admin-login.html")(req, res); res.status(404).send("Not Found"); });
+app.get(`/admin`, (req, res) => { if (req.query.key === ADMIN_SECRET) return serveHtml("admin.html")(req, res); res.status(404).send("Not Found"); });
+app.get(`/admin-events`, (req, res) => { if (req.query.key === ADMIN_SECRET) return serveHtml("admin-events.html")(req, res); res.status(404).send("Not Found"); });
+app.get(`/generator`, (req, res) => { if (req.query.key === ADMIN_SECRET) return serveHtml("generator.html")(req, res); res.status(404).send("Not Found"); });
 app.get("/ticket", serveHtml("ticket.html"));
 app.get("/payment", serveHtml("payment.html"));
 app.get("/pay", serveHtml("pay.html"));
-app.get("/show/:id/:lid", serveHtml("event.html"));
-app.get("/show/:city/:id/:lid", serveHtml("event.html"));
-app.get("/show/:city/:id", serveHtml("event.html"));
-app.get("/event/:id", serveHtml("event.html"));
+app.get("/show/:city/:id/:urlCode", serveHtml("event.html"));
 app.get("/e/:code", serveHtml("event.html"));
 app.get("/booking/:id", serveHtml("booking.html"));
 app.get("/booking-link/:code", serveHtml("booking.html"));
@@ -1542,16 +1545,25 @@ app.post("/api/generator/create-link", async (req, res) => {
     const linkCode = generateLinkCode();
     const pool = tryGetPool();
     if (pool) {
+      let urlCode: string;
+      for (let attempts = 0; attempts < 20; attempts++) {
+        urlCode = generateUrlCode();
+        const exists = await pool.query("SELECT 1 FROM generated_links WHERE url_code = $1", [urlCode]);
+        if (exists.rows.length === 0) break;
+      }
       const addrResult = await pool.query("SELECT venue_address FROM event_template_addresses WHERE event_template_id = $1 AND city_id = $2", [event_template_id, city_id]);
       const venueAddress = addrResult.rows[0]?.venue_address || null;
-      const insertResult = await pool.query(`INSERT INTO generated_links (link_code, event_template_id, city_id, event_date, event_time, available_seats, venue_address, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7, true) RETURNING id`, [linkCode, event_template_id, city_id, event_date, event_time, available_seats || 100, venueAddress]);
-      return res.json({ success: true, link_code: linkCode, link_id: insertResult.rows[0].id });
+      const insertResult = await pool.query(`INSERT INTO generated_links (link_code, url_code, event_template_id, city_id, event_date, event_time, available_seats, venue_address, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true) RETURNING id, url_code`, [linkCode, urlCode!, event_template_id, city_id, event_date, event_time, available_seats || 100, venueAddress]);
+      return res.json({ success: true, link_code: linkCode, link_id: insertResult.rows[0].id, url_code: insertResult.rows[0].url_code });
     }
+    let urlCode = generateUrlCode();
+    while (inMemoryLinks.some(l => l.url_code === urlCode)) { urlCode = generateUrlCode(); }
     const tmpl = EVENT_TEMPLATES.find(t => t.id === parseInt(event_template_id));
     const city = CITIES.find(c => c.id === parseInt(city_id));
     const newLink: InMemoryLink = {
       id: inMemoryLinkIdCounter++,
       link_code: linkCode,
+      url_code: urlCode,
       event_template_id: parseInt(event_template_id),
       city_id: parseInt(city_id),
       event_date: event_date || new Date().toISOString().split('T')[0],
@@ -1564,7 +1576,7 @@ app.post("/api/generator/create-link", async (req, res) => {
       city_name: city?.name || 'Город',
     };
     inMemoryLinks.push(newLink);
-    res.json({ success: true, link_code: linkCode, link_id: newLink.id });
+    res.json({ success: true, link_code: linkCode, link_id: newLink.id, url_code: urlCode });
   } catch { res.status(500).json({ success: false, message: "Ошибка создания ссылки" }); }
 });
 
@@ -1576,6 +1588,19 @@ app.get("/api/generator/link-info/:id", async (req, res) => {
       if (result.rows.length > 0) return res.json(result.rows[0]);
     }
     const link = inMemoryLinks.find(l => l.id === parseInt(req.params.id));
+    if (!link) return res.status(404).json({ error: "Link not found" });
+    res.json(link);
+  } catch { res.status(500).json({ error: "Server error" }); }
+});
+
+app.get("/api/generator/link-info-by-code/:urlCode", async (req, res) => {
+  try {
+    const pool = tryGetPool();
+    if (pool) {
+      const result = await pool.query(`SELECT gl.*, et.name as event_name, c.name as city_name FROM generated_links gl LEFT JOIN event_templates et ON gl.event_template_id = et.id LEFT JOIN cities c ON gl.city_id = c.id WHERE gl.url_code = $1`, [req.params.urlCode]);
+      if (result.rows.length > 0) return res.json(result.rows[0]);
+    }
+    const link = inMemoryLinks.find(l => l.url_code === req.params.urlCode);
     if (!link) return res.status(404).json({ error: "Link not found" });
     res.json(link);
   } catch { res.status(500).json({ error: "Server error" }); }
@@ -1687,8 +1712,8 @@ app.get("/api/event-by-city/:citySlug/:templateId", async (req, res) => {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   try {
     const { citySlug, templateId } = req.params;
-    const linkIdParam = req.query.lid as string;
-    if (!linkIdParam) return res.status(404).json({ error: "Link not found" });
+    const urlCodeParam = req.query.u as string;
+    if (!urlCodeParam) return res.status(404).json({ error: "Link not found" });
 
     const pool = tryGetPool();
     if (pool) {
@@ -1699,7 +1724,7 @@ app.get("/api/event-by-city/:citySlug/:templateId", async (req, res) => {
         FROM generated_links gl LEFT JOIN event_templates et ON gl.event_template_id = et.id
         LEFT JOIN categories cat ON et.category_id = cat.id LEFT JOIN cities ON gl.city_id = cities.id
         LEFT JOIN event_template_addresses eta ON eta.event_template_id = et.id AND eta.city_id = gl.city_id
-        WHERE gl.id = $1`, [linkIdParam]);
+        WHERE gl.url_code = $1`, [urlCodeParam]);
 
       if (linkResult.rows.length > 0) {
         const link = linkResult.rows[0];
@@ -1722,7 +1747,7 @@ app.get("/api/event-by-city/:citySlug/:templateId", async (req, res) => {
         });
       }
     }
-    const memLink = inMemoryLinks.find(l => l.id === parseInt(linkIdParam));
+    const memLink = inMemoryLinks.find(l => l.url_code === urlCodeParam);
     if (!memLink) return res.status(404).json({ error: "Link not found" });
     if (!memLink.is_active) return res.status(404).json({ error: "Link is disabled" });
     const tmpl = EVENT_TEMPLATES.find(t => t.id === memLink.event_template_id);

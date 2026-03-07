@@ -804,34 +804,9 @@
     function getNewUrlParams() {
       const path = window.location.pathname;
       
-      // SIMPLE FORMAT (preferred): /show/templateId/linkId (no city slug!)
-      // This is the cleanest format - linkId uniquely identifies everything
-      const simpleMatch = path.match(/^\/show\/(\d+)\/(\d+)$/i);
-      if (simpleMatch) {
-        return { templateId: simpleMatch[1], lid: simpleMatch[2], simple: true };
-      }
-      
-      // Legacy format: /show/city/id/lid (with city slug)
-      const matchWithLid = path.match(/^\/show\/([a-z-]+)\/(\d+)\/(\d+)/i);
-      if (matchWithLid) {
-        return { citySlug: matchWithLid[1], templateId: matchWithLid[2], lid: matchWithLid[3] };
-      }
-      
-      // Fallback: /show/city/id without lid in path
-      const match = path.match(/^\/show\/([a-z-]+)\/(\d+)/i);
-      if (match) {
-        const urlParams = new URLSearchParams(window.location.search);
-        let lid = urlParams.get('lid');
-        
-        if (!lid) {
-          const decodedPath = decodeURIComponent(path);
-          const encodedMatch = decodedPath.match(/\?lid=(\d+)/);
-          if (encodedMatch) {
-            lid = encodedMatch[1];
-          }
-        }
-        
-        return { citySlug: match[1], templateId: match[2], lid: lid || undefined };
+      const matchWithCode = path.match(/^\/show\/([a-z-]+)\/(\d+)\/(\d{5})$/i);
+      if (matchWithCode) {
+        return { citySlug: matchWithCode[1], templateId: matchWithCode[2], urlCode: matchWithCode[3] };
       }
       return null;
     }
@@ -881,14 +856,12 @@
       
       try {
         if (isNewUrlFormat) {
-          linkId = newUrlParams.lid || null;
+          const urlCode = newUrlParams.urlCode;
           
-          console.log('[EventPage] New URL format:', { simple: newUrlParams.simple, lid: linkId });
+          console.log('[EventPage] New URL format:', { urlCode, citySlug: newUrlParams.citySlug, templateId: newUrlParams.templateId });
           
-          if (linkId) {
-            // ALWAYS use /api/event-by-link for linkId-based lookups
-            // This ensures we get authoritative data from the link, ignoring any URL manipulation
-            const apiUrl = `/api/event-by-link/${linkId}`;
+          if (urlCode) {
+            const apiUrl = `/api/event-by-city/${newUrlParams.citySlug}/${newUrlParams.templateId}?u=${urlCode}`;
             console.log('[EventPage] Fetching:', apiUrl);
             const res = await fetch(apiUrl);
             console.log('[EventPage] API response status:', res.status);
@@ -896,17 +869,10 @@
               const data = await res.json();
               console.log('[EventPage] API data:', data);
               if (data && !data.error) {
-                // Validate templateId matches if URL specified one
-                const urlTemplateId = parseInt(newUrlParams.templateId);
-                if (data.templateId && urlTemplateId !== data.templateId) {
-                  console.error('[EventPage] Template mismatch! URL:', urlTemplateId, 'API:', data.templateId);
-                  showUnavailablePage();
-                  return;
-                }
-                
                 isGeneratedLink = true;
-                templateId = data.templateId || urlTemplateId; // Trust API templateId first
-                linkCode = data.linkCode; // Store link code for booking navigation
+                templateId = data.templateId || parseInt(newUrlParams.templateId);
+                linkCode = data.linkCode;
+                linkId = data.linkId;
                 eventData = {
                   id: data.id,
                   name: data.name,
@@ -925,12 +891,11 @@
                 };
                 currentCitySlug = data.citySlug || transliterate(data.cityName);
                 
-                // Update localStorage with new valid access
                 if (data.cityName && data.cityId) {
                   localStorage.setItem('afisha_city_access', JSON.stringify({
                     cityId: data.cityId,
                     cityName: data.cityName,
-                    linkCode: data.linkCode || linkId,
+                    linkCode: data.linkCode,
                     accessTime: Date.now()
                   }));
                 }
@@ -945,58 +910,8 @@
               return;
             }
           } else {
-            // No lid - check if user has localStorage access (came from valid link before)
-            const accessData = localStorage.getItem('afisha_city_access');
-            if (!accessData) {
-              showUnavailablePage();
-              return;
-            }
-            
-            let storedCity = '';
-            let storedCityId = null;
-            try {
-              const access = JSON.parse(accessData);
-              storedCity = access.cityName || '';
-              storedCityId = access.cityId || null;
-            } catch (e) {}
-            
-            if (!storedCity || !storedCityId) {
-              showUnavailablePage();
-              return;
-            }
-            
-            // Load template for full access (user can view AND book)
-            const templateRes = await fetch(`/api/generator/event-templates/${newUrlParams.templateId}`);
-            if (templateRes.ok) {
-              const templateData = await templateRes.json();
-              const tpl = templateData.template || templateData;
-              if (tpl && !templateData.error && tpl.isActive !== false) {
-                isEventTemplate = true;
-                templateId = tpl.id; // Store for recommendations filtering
-                eventData = {
-                  id: tpl.id,
-                  name: tpl.name,
-                  description: tpl.description,
-                  price: 2490,
-                  categoryName: tpl.categoryName,
-                  cityName: storedCity,
-                  cityId: storedCityId,
-                  venue: '',
-                  date: new Date().toISOString(),
-                  time: '12:00',
-                  availableSeats: 50,
-                  images: tpl.images || [],
-                  coverImageUrl: tpl.image_url || (tpl.images && tpl.images[0])
-                };
-                currentCitySlug = transliterate(storedCity);
-              } else {
-                showUnavailablePage();
-                return;
-              }
-            } else {
-              showUnavailablePage();
-              return;
-            }
+            showUnavailablePage();
+            return;
           }
         } else if (isGeneratedLink) {
           // Load from generated link
@@ -1046,56 +961,8 @@
             return;
           }
         } else {
-          // Regular event loading from template
-          const eventId = getEventId();
-          
-          // Get city from localStorage
-          const accessData = localStorage.getItem('afisha_city_access');
-          let storedCity = '';
-          let storedCityId = null;
-          if (accessData) {
-            try {
-              const access = JSON.parse(accessData);
-              storedCity = access.cityName || '';
-              storedCityId = access.cityId || null;
-            } catch (e) {}
-          }
-          
-          // If no city access, show 404
-          if (!storedCity || !storedCityId) {
-            showUnavailablePage();
-            return;
-          }
-          
-          const templateRes = await fetch(`/api/generator/event-templates/${eventId}`);
-          
-          if (templateRes.ok) {
-            const templateData = await templateRes.json();
-            const tpl = templateData.template || templateData; // Extract from wrapper
-            if (tpl && !templateData.error) {
-              isEventTemplate = true;
-              templateId = tpl.id; // Store for recommendations filtering
-              eventData = {
-                id: tpl.id,
-                name: tpl.name,
-                description: tpl.description,
-                price: 2490,
-                categoryName: tpl.categoryName,
-                cityName: storedCity,
-                cityId: storedCityId,
-                venue: '',
-                date: new Date().toISOString(),
-                availableSeats: 50,
-                images: tpl.images || [],
-                coverImageUrl: tpl.image_url || (tpl.images && tpl.images[0])
-              };
-              currentCitySlug = transliterate(storedCity);
-            }
-          }
-          
-          if (!eventData) {
-            eventData = getDemoEvent();
-          }
+          showUnavailablePage();
+          return;
         }
       } catch (err) {
         console.error('Error loading data:', err);
