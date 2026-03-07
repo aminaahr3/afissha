@@ -114,7 +114,7 @@ export const EVENT_TEMPLATE_IMAGES: Record<number, string> = {
   17: 'https://mir-kvestov.ru/uploads/quest_photos/26054/kvest-outlast-quest-stars-3e78602f.jpg?v=1761644183',
   18: 'https://topkvest.by/storage/thumb/quest_image/w800_h600_01K33PHCKAXSDG2C727MJBY1NW.jpeg',
   19: 'https://ulet.pro/sites/default/files/field/image/blog_post/aerotruba-bezopasnyy-sposob.jpg',
-  20: 'https://xn--80aagidgbdm1a7a.xn--p1ai/wp-content/uploads/2021/05/5e4o9PQ2aRY-1024x683.jpg',
+  20: 'https://resize.tripster.ru/CwGIW9nfE-TxrqgFc9pbT_yWhas=/fit-in/1220x600/filters:no_upscale()/https://cdn.tripster.ru/photos/d77e8130-139a-4c81-9faa-444d14603983.jpg',
   21: 'https://avatars.mds.yandex.net/get-altay/14112077/2a00000191e1042ff59bc038768f19a644a3/L_height',
   22: 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcT_VzElIKBhcpDFrp1foiRI475b-PZrLRqXAg&s',
   23: 'https://cdn-ua.bodo.gift/resize/upload/files/cm-experience/103/102695/images_file/all_all_big-t1585036987-r1w768h425q90zc1.jpg',
