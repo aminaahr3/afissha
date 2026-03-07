@@ -1556,7 +1556,7 @@
       document.getElementById('ticketPriceDisplay').textContent = ticket.price + ' ₽';
       
       if (ticket.imageUrl) {
-        document.getElementById('ticketImageDisplay').style.backgroundImage = `url(${ticket.imageUrl})`;
+        document.getElementById('ticketImageDisplay').style.backgroundImage = `url('${ticket.imageUrl.replace(/'/g, "\\'")}')`;  
       } else {
         document.getElementById('ticketImageDisplay').style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
       }
