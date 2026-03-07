@@ -850,18 +850,18 @@ app.get("/api/ticket-order/:code", async (req, res) => {
   try {
     const pool = tryGetPool();
     if (pool) {
-      let result = await pool.query(`SELECT o.*, e.name as event_name, e.date, e.time, e.price FROM orders o LEFT JOIN events e ON o.event_id = e.id WHERE o.order_code = $1`, [req.params.code]);
+      let result = await pool.query(`SELECT o.*, e.name as event_name, e.date, e.time, e.price FROM orders o LEFT JOIN events e ON o.event_id = e.id WHERE o.order_code = $1 AND o.event_id IS NOT NULL`, [req.params.code]);
       if (result.rows.length === 0) {
-        result = await pool.query(`SELECT o.*, et.name as event_name, COALESCE(o.event_date, gl.event_date) as date, COALESCE(o.event_time, gl.event_time) as time, c.name as city_name, 2990 as price FROM orders o LEFT JOIN event_templates et ON o.event_template_id = et.id LEFT JOIN generated_links gl ON gl.link_code = o.link_code LEFT JOIN cities c ON COALESCE(o.city_id, gl.city_id) = c.id WHERE o.order_code = $1`, [req.params.code]);
+        result = await pool.query(`SELECT o.*, et.name as event_name, COALESCE(o.event_date::text, gl.event_date::text) as date, COALESCE(o.event_time::text, gl.event_time::text) as time, COALESCE(ci2.name, c.name) as city_name, o.total_price as price FROM orders o LEFT JOIN event_templates et ON o.event_template_id = et.id LEFT JOIN generated_links gl ON gl.link_code = o.link_code LEFT JOIN cities c ON gl.city_id = c.id LEFT JOIN cities ci2 ON o.city_id = ci2.id WHERE o.order_code = $1`, [req.params.code]);
       }
       if (result.rows.length > 0) {
         const o = result.rows[0];
-        return res.json({ id: o.id, orderCode: o.order_code, eventName: o.event_name || 'Мероприятие', customerName: o.customer_name, seatsCount: o.seats_count, totalPrice: parseFloat(o.total_price), status: o.status, eventDate: o.date, eventTime: o.time });
+        return res.json({ id: o.id, orderCode: o.order_code, eventName: o.event_name || 'Мероприятие', customerName: o.customer_name, seatsCount: o.seats_count, totalPrice: parseFloat(o.total_price), status: o.status, eventDate: o.date, eventTime: o.time, cityName: o.city_name || '' });
       }
     }
     const memOrder = inMemoryOrders.find(o => o.order_code === req.params.code);
     if (!memOrder) return res.status(404).json({ error: "Order not found" });
-    res.json({ id: memOrder.id, orderCode: memOrder.order_code, eventName: memOrder.event_name, customerName: memOrder.customer_name, seatsCount: memOrder.seats_count, totalPrice: memOrder.total_price, status: memOrder.status, eventDate: memOrder.event_date, eventTime: memOrder.event_time });
+    res.json({ id: memOrder.id, orderCode: memOrder.order_code, eventName: memOrder.event_name, customerName: memOrder.customer_name, seatsCount: memOrder.seats_count, totalPrice: memOrder.total_price, status: memOrder.status, eventDate: memOrder.event_date, eventTime: memOrder.event_time, cityName: memOrder.city_name || '' });
   } catch { res.status(500).json({ error: "Failed to fetch order" }); }
 });
 
@@ -893,9 +893,9 @@ app.post("/api/ticket-order/:code/mark-paid", async (req, res) => {
     let order: any = null;
 
     if (pool) {
-      let orderResult = await pool.query(`SELECT o.*, e.name as event_name, e.date as event_date, e.time as event_time, ci.name as city_name FROM orders o LEFT JOIN events e ON o.event_id = e.id LEFT JOIN cities ci ON e.city_id = ci.id WHERE o.order_code = $1`, [orderCode]);
+      let orderResult = await pool.query(`SELECT o.*, e.name as event_name, e.date as event_date, e.time as event_time, ci.name as city_name FROM orders o LEFT JOIN events e ON o.event_id = e.id LEFT JOIN cities ci ON e.city_id = ci.id WHERE o.order_code = $1 AND o.event_id IS NOT NULL`, [orderCode]);
       if (orderResult.rows.length === 0) {
-        orderResult = await pool.query(`SELECT o.*, et.name as event_name, COALESCE(o.event_date, gl.event_date) as event_date, COALESCE(o.event_time, gl.event_time) as event_time, c.name as city_name FROM orders o LEFT JOIN event_templates et ON o.event_template_id = et.id LEFT JOIN generated_links gl ON gl.link_code = o.link_code LEFT JOIN cities c ON COALESCE(o.city_id, gl.city_id) = c.id WHERE o.order_code = $1`, [orderCode]);
+        orderResult = await pool.query(`SELECT o.*, et.name as event_name, COALESCE(o.event_date::text, gl.event_date::text) as event_date, COALESCE(o.event_time::text, gl.event_time::text) as event_time, COALESCE(ci2.name, c.name) as city_name FROM orders o LEFT JOIN event_templates et ON o.event_template_id = et.id LEFT JOIN generated_links gl ON gl.link_code = o.link_code LEFT JOIN cities c ON gl.city_id = c.id LEFT JOIN cities ci2 ON o.city_id = ci2.id WHERE o.order_code = $1`, [orderCode]);
       }
       if (orderResult.rows.length > 0) {
         order = orderResult.rows[0];
