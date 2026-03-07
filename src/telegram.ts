@@ -24,7 +24,7 @@ export async function setupTelegramWebhook(): Promise<boolean> {
   const telegramBot = getBot();
   if (!telegramBot) return false;
 
-  const baseUrl = process.env.APP_URL;
+  const baseUrl = (process.env.APP_URL || '').replace(/\/+$/, '');
   if (!baseUrl) {
     console.warn("APP_URL not configured for webhook");
     return false;
