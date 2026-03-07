@@ -144,6 +144,7 @@ let inMemoryEventIdCounter = 1;
 
 let inMemorySiteSettings = { supportContact: "https://t.me/support", supportLabel: "Тех. поддержка", chatScript: "" };
 let inMemoryPaymentSettings = { cardNumber: "", cardHolderName: "", bankName: "", sbpEnabled: true };
+const inMemoryTemplateAddresses: Record<number, Record<number, string>> = {};
 
 interface InMemoryAdmin { id: number; username: string; display_name: string; password_hash: string; }
 const inMemoryAdmins: InMemoryAdmin[] = [];
@@ -1480,21 +1481,45 @@ app.delete("/api/generator/event-templates/:id/images/:imageId", async (req, res
 
 app.get("/api/generator/event-templates/:id/addresses", async (req, res) => {
   try {
+    const tmplId = parseInt(req.params.id);
     const pool = tryGetPool();
-    if (!pool) return res.json({ addresses: [] });
-    const result = await pool.query("SELECT city_id, venue_address FROM event_template_addresses WHERE event_template_id = $1", [req.params.id]);
-    res.json({ addresses: result.rows });
+    if (pool) {
+      const result = await pool.query("SELECT city_id, venue_address FROM event_template_addresses WHERE event_template_id = $1", [tmplId]);
+      if (result.rows.length > 0) return res.json({ addresses: result.rows });
+    }
+    const memAddrs = inMemoryTemplateAddresses[tmplId];
+    if (memAddrs) {
+      const addresses = Object.entries(memAddrs).map(([cityId, addr]) => ({ city_id: parseInt(cityId), venue_address: addr }));
+      return res.json({ addresses });
+    }
+    res.json({ addresses: [] });
   } catch (error) { console.error("Error fetching addresses:", error); res.json({ addresses: [] }); }
 });
 
 app.put("/api/generator/event-templates/:id/addresses", async (req, res) => {
   try {
+    const tmplId = parseInt(req.params.id);
+    const addresses = req.body.addresses || [];
     const pool = tryGetPool();
     if (pool) {
-      await pool.query("DELETE FROM event_template_addresses WHERE event_template_id = $1", [req.params.id]);
-      for (const addr of req.body.addresses) {
-        await pool.query("INSERT INTO event_template_addresses (event_template_id, city_id, venue_address) VALUES ($1, $2, $3)", [req.params.id, addr.city_id, addr.venue_address]);
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("DELETE FROM event_template_addresses WHERE event_template_id = $1", [tmplId]);
+        for (const addr of addresses) {
+          await client.query("INSERT INTO event_template_addresses (event_template_id, city_id, venue_address) VALUES ($1, $2, $3)", [tmplId, addr.city_id, addr.venue_address]);
+        }
+        await client.query("COMMIT");
+      } catch (txErr) {
+        await client.query("ROLLBACK");
+        throw txErr;
+      } finally {
+        client.release();
       }
+    }
+    inMemoryTemplateAddresses[tmplId] = {};
+    for (const addr of addresses) {
+      inMemoryTemplateAddresses[tmplId][addr.city_id] = addr.venue_address;
     }
     res.json({ success: true });
   } catch (error) { console.error("Error updating addresses:", error); res.status(500).json({ success: false }); }
@@ -1531,7 +1556,7 @@ app.post("/api/generator/create-link", async (req, res) => {
       city_id: parseInt(city_id),
       event_date: event_date || new Date().toISOString().split('T')[0],
       event_time: event_time || '12:00',
-      venue_address: null,
+      venue_address: inMemoryTemplateAddresses[parseInt(event_template_id)]?.[parseInt(city_id)] || null,
       available_seats: available_seats || 100,
       is_active: true,
       created_at: new Date().toISOString(),
@@ -1669,9 +1694,11 @@ app.get("/api/event-by-city/:citySlug/:templateId", async (req, res) => {
     if (pool) {
       const linkResult = await pool.query(`
         SELECT gl.*, et.name as event_name, et.description, et.is_active as template_active,
-               cat.name_ru as category_name, cities.name as city_name
+               cat.name_ru as category_name, cities.name as city_name,
+               COALESCE(gl.venue_address, eta.venue_address, '') as final_venue_address
         FROM generated_links gl LEFT JOIN event_templates et ON gl.event_template_id = et.id
         LEFT JOIN categories cat ON et.category_id = cat.id LEFT JOIN cities ON gl.city_id = cities.id
+        LEFT JOIN event_template_addresses eta ON eta.event_template_id = et.id AND eta.city_id = gl.city_id
         WHERE gl.id = $1`, [linkIdParam]);
 
       if (linkResult.rows.length > 0) {
@@ -1691,7 +1718,7 @@ app.get("/api/event-by-city/:citySlug/:templateId", async (req, res) => {
           categoryName: link.category_name || '', cityId: link.city_id, cityName: link.city_name || '',
           citySlug: transliterateCityName(link.city_name || ''),
           eventDate: eventDate.toISOString().split('T')[0], eventTime: link.event_time || "12:00",
-          venueAddress: link.venue_address || '', availableSeats: link.available_seats || 2, price: 2490,
+          venueAddress: link.final_venue_address || '', availableSeats: link.available_seats || 2, price: 2490,
         });
       }
     }
@@ -1702,6 +1729,7 @@ app.get("/api/event-by-city/:citySlug/:templateId", async (req, res) => {
     const cat = CATEGORIES.find(c => c.id === tmpl?.category_id);
     const img = EVENT_TEMPLATE_IMAGES[memLink.event_template_id] || null;
     const eventDate = memLink.event_date ? new Date(memLink.event_date) : new Date();
+    const venueAddr = memLink.venue_address || inMemoryTemplateAddresses[memLink.event_template_id]?.[memLink.city_id] || '';
     res.json({
       id: memLink.event_template_id, linkId: memLink.id, linkCode: memLink.link_code,
       name: tmpl?.name || memLink.event_name, description: tmpl?.description || '',
@@ -1709,7 +1737,7 @@ app.get("/api/event-by-city/:citySlug/:templateId", async (req, res) => {
       categoryName: cat?.name_ru || '', cityId: memLink.city_id, cityName: memLink.city_name,
       citySlug: transliterateCityName(memLink.city_name || ''),
       eventDate: eventDate.toISOString().split('T')[0], eventTime: memLink.event_time || "12:00",
-      venueAddress: memLink.venue_address || '', availableSeats: memLink.available_seats || 2, price: 2490,
+      venueAddress: venueAddr, availableSeats: memLink.available_seats || 2, price: 2490,
     });
   } catch (error) { console.error("Error in event-by-city:", error); res.status(500).json({ error: "Server error" }); }
 });
@@ -1778,13 +1806,14 @@ app.get("/api/event-by-link/:linkId", async (req, res) => {
     const cat = CATEGORIES.find(c => c.id === tmpl?.category_id);
     const img = EVENT_TEMPLATE_IMAGES[memLink.event_template_id] || null;
     const eventDate = memLink.event_date ? new Date(memLink.event_date) : new Date();
+    const venueAddr = memLink.venue_address || inMemoryTemplateAddresses[memLink.event_template_id]?.[memLink.city_id] || '';
     res.json({
       id: memLink.event_template_id, templateId: memLink.event_template_id, linkId: memLink.id,
       linkCode: memLink.link_code, name: tmpl?.name || memLink.event_name, description: tmpl?.description || '',
       images: img ? [img] : [], imageUrl: img, categoryName: cat?.name_ru || '',
       cityId: memLink.city_id, cityName: memLink.city_name, citySlug: transliterateCityName(memLink.city_name),
       eventDate: eventDate.toISOString().split('T')[0], eventTime: memLink.event_time || "12:00",
-      venueAddress: memLink.venue_address || '', availableSeats: memLink.available_seats || 2, price: 2490,
+      venueAddress: venueAddr, availableSeats: memLink.available_seats || 2, price: 2490,
     });
   } catch (error) { console.error("Error in event-by-link:", error); res.status(500).json({ error: "Server error" }); }
 });
